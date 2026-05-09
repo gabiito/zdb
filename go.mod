@@ -3,6 +3,7 @@ module github.com/gabiito/db-viewer
 go 1.25.0
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jackc/pgx/v5 v5.9.2
 	modernc.org/sqlite v1.50.0

@@ -1,0 +1,21 @@
+[[connections]]
+name   = "local-sqlite"
+engine = "sqlite"
+dsn    = "/tmp/test.db"
+
+[[connections]]
+name   = "local-pg"
+engine = "postgres"
+dsn    = "postgres://user:pass@localhost:5432/mydb?sslmode=disable"
+
+[[connections]]
+name   = "local-mysql"
+engine = "mysql"
+dsn    = "user:pass@tcp(127.0.0.1:3306)/mydb?parseTime=true"
+
+[ai]
+provider        = "openai-compat"
+base_url        = "https://api.openai.com/v1"
+model           = "gpt-4o-mini"
+api_key_env     = "OPENAI_API_KEY"
+timeout_seconds = 30
