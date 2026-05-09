@@ -1,0 +1,9 @@
+## Schema
+a_table(id INTEGER PK NOT NULL, name TEXT)
+b_table(id INTEGER PK NOT NULL, name TEXT)
+c_table(id INTEGER PK NOT NULL, name TEXT)
+d_table(id INTEGER PK NOT NULL, name TEXT)
+e_table(id INTEGER PK NOT NULL, name TEXT)
+
+## Question
+show all users

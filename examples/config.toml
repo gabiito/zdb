@@ -1,0 +1,51 @@
+# db-viewer configuration file
+# Copy this file to ~/.config/dbviewer/config.toml and customize it.
+# You can also set DBVIEWER_CONFIG=/path/to/config.toml to use a custom path.
+
+# ── Connections ───────────────────────────────────────────────────────────────
+# Add one [[connections]] block per database you want to connect to.
+# Supported engines: sqlite | postgres | mysql
+
+[[connections]]
+name   = "my-sqlite"
+engine = "sqlite"
+dsn    = "/home/yourname/data.db"
+
+# [[connections]]
+# name   = "local-pg"
+# engine = "postgres"
+# dsn    = "postgres://user:pass@localhost:5432/mydb?sslmode=disable"
+
+# [[connections]]
+# name   = "local-mysql"
+# engine = "mysql"
+# dsn    = "user:pass@tcp(127.0.0.1:3306)/mydb?parseTime=true"
+
+# ── AI Configuration (optional) ───────────────────────────────────────────────
+# Omit this section entirely (or leave api_key_env unset) to disable AI.
+# Supported providers: any OpenAI-compatible HTTP API (OpenAI, Ollama, Groq, etc.)
+
+# ---- Example 1: OpenAI cloud (gpt-4o-mini) ----------------------------------
+# [ai]
+# provider        = "openai-compat"
+# base_url        = "https://api.openai.com/v1"
+# model           = "gpt-4o-mini"
+# api_key_env     = "OPENAI_API_KEY"   # export OPENAI_API_KEY=sk-...
+# timeout_seconds = 30
+
+# ---- Example 2: Ollama local (llama3) ---------------------------------------
+# No API key required for Ollama; leave api_key_env pointing to an unset var.
+# [ai]
+# provider        = "openai-compat"
+# base_url        = "http://localhost:11434/v1"
+# model           = "llama3"
+# api_key_env     = "OLLAMA_API_KEY"   # leave OLLAMA_API_KEY unset (or empty)
+# timeout_seconds = 60                 # local models can be slower
+
+# ---- Example 3: Groq cloud --------------------------------------------------
+# [ai]
+# provider        = "openai-compat"
+# base_url        = "https://api.groq.com/openai/v1"
+# model           = "llama3-8b-8192"
+# api_key_env     = "GROQ_API_KEY"     # export GROQ_API_KEY=gsk_...
+# timeout_seconds = 30
