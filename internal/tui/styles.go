@@ -60,6 +60,20 @@ var (
 	StyleHelp = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241"))
 
+	// Highlighted row in the data viewer. Uses AdaptiveColor so contrast holds
+	// against both dark and light terminal themes.
+	StyleSelectedRow = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.AdaptiveColor{Light: "16", Dark: "231"}).
+				Background(lipgloss.AdaptiveColor{Light: "117", Dark: "62"})
+
+	// Highlighted cell on top of the selected row — stronger contrast so the
+	// cursor reads as a spreadsheet-style cell selection.
+	StyleSelectedCell = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.AdaptiveColor{Light: "231", Dark: "231"}).
+				Background(lipgloss.AdaptiveColor{Light: "201", Dark: "205"})
+
 	// Active pane border
 	StyleActiveBorder = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).

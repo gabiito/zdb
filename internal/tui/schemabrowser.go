@@ -71,13 +71,54 @@ func NewSchemaBrowserModel(
 	l.Title = "Tables"
 	l.Styles.Title = StyleTitle
 
-	return SchemaBrowserModel{
+	sb := SchemaBrowserModel{
 		tableList: l,
 		cache:     cache,
 		width:     width,
 		height:    height,
 		focusLeft: true,
 	}
+	// Show the first table's schema immediately so the right pane is populated
+	// from the moment the browser opens.
+	sb.syncHighlightedTable()
+	return sb
+}
+
+// syncHighlightedTable populates the right pane with the schema of whichever
+// table is currently highlighted in the left list. Idempotent — safe to call
+// after every Update.
+func (m *SchemaBrowserModel) syncHighlightedTable() {
+	item, ok := m.tableList.SelectedItem().(tableListItem)
+	if !ok {
+		return
+	}
+	qualName := item.summary.Name
+	if item.summary.Schema != "" {
+		qualName = item.summary.Schema + "." + item.summary.Name
+	}
+	if tbl := m.cache.Table(qualName); tbl != nil {
+		m.selectedTbl = tbl
+		m.columns = tbl.Columns
+	}
+}
+
+// SetSize updates the available width/height of the browser. Called by the
+// App on every render so the panes shrink to fit the SQL bar and banners.
+func (m *SchemaBrowserModel) SetSize(w, h int) {
+	if w <= 0 || h <= 0 {
+		return
+	}
+	m.width = w
+	m.height = h
+	leftWidth := w / 3
+	if leftWidth < 16 {
+		leftWidth = 16
+	}
+	listH := h - 4
+	if listH < 1 {
+		listH = 1
+	}
+	m.tableList.SetSize(leftWidth, listH)
 }
 
 // Init implements tea.Model.
@@ -87,24 +128,17 @@ func (m SchemaBrowserModel) Init() tea.Cmd { return nil }
 func (m SchemaBrowserModel) Update(msg tea.Msg) (SchemaBrowserModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "enter":
-			item, ok := m.tableList.SelectedItem().(tableListItem)
-			if !ok {
-				break
-			}
-			qualName := item.summary.Name
-			if item.summary.Schema != "" {
-				qualName = item.summary.Schema + "." + item.summary.Name
-			}
-			tbl := m.cache.Table(qualName)
-			if tbl == nil {
-				break
-			}
-			m.selectedTbl = tbl
-			m.columns = tbl.Columns
-			return m, func() tea.Msg {
-				return OpenTableMsg{Table: tbl}
+		if msg.String() == "enter" {
+			if item, ok := m.tableList.SelectedItem().(tableListItem); ok {
+				qualName := item.summary.Name
+				if item.summary.Schema != "" {
+					qualName = item.summary.Schema + "." + item.summary.Name
+				}
+				if tbl := m.cache.Table(qualName); tbl != nil {
+					return m, func() tea.Msg {
+						return OpenTableMsg{Table: tbl}
+					}
+				}
 			}
 		}
 	case tea.WindowSizeMsg:
@@ -116,6 +150,7 @@ func (m SchemaBrowserModel) Update(msg tea.Msg) (SchemaBrowserModel, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.tableList, cmd = m.tableList.Update(msg)
+	m.syncHighlightedTable()
 	return m, cmd
 }
 

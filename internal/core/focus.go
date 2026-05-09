@@ -20,6 +20,12 @@ const (
 	ModalConfirm // mutating SQL / DELETE / commit-edit confirmation
 	ModalNotice  // non-blocking info banner
 	ModalCellView // cell viewport (read-only, triggered by 'v')
+	ModalStagedView // list of staged edits (triggered by 'S')
+	ModalJoinWizard // multi-step join builder (triggered by 'J')
+	ModalViewsList // list of saved views (triggered by 'V')
+	ModalSaveView // textinput to name a saved view (triggered by 'W')
+	ModalJoinChoice // add-vs-replace prompt when J is pressed on a join chain
+	ModalAddConnection // form for adding a new DB connection from the conn picker
 )
 
 // FocusState tracks which sub-component owns keyboard input within a screen.

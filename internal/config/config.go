@@ -16,11 +16,24 @@ type Config struct {
 	AI          *AI          `toml:"ai"` // nil => AI disabled
 }
 
-// Connection describes a named database connection profile.
+// Connection describes a named database connection profile. Credentials may
+// be stored in three ways, in order of preference:
+//
+//  1. KeyringKey — the password lives in the OS keyring; DSN is a template
+//     containing the literal `{password}` placeholder, substituted at
+//     connect time. This is the default for new connections created via
+//     the in-app form.
+//  2. DSNEnv — the entire DSN is read from the named environment variable
+//     at connect time. Useful in headless environments without a keyring.
+//  3. DSN — full DSN string, possibly containing a plaintext password.
+//     Allowed for backward-compatibility and for credential-less DSNs
+//     (e.g. SQLite file paths) but discouraged for secrets.
 type Connection struct {
-	Name   string `toml:"name"`
-	Engine string `toml:"engine"`
-	DSN    string `toml:"dsn"`
+	Name       string `toml:"name"`
+	Engine     string `toml:"engine"`
+	DSN        string `toml:"dsn,omitempty"`
+	KeyringKey string `toml:"keyring_key,omitempty"`
+	DSNEnv     string `toml:"dsn_env,omitempty"`
 }
 
 // AI holds AI provider configuration.
@@ -37,6 +50,26 @@ var validEngines = map[string]bool{
 	"sqlite":   true,
 	"postgres": true,
 	"mysql":    true,
+}
+
+// ResolvePath returns the absolute path of the config file using the same
+// lookup order as Load(). When no file exists, returns the default path
+// where one would be created.
+func ResolvePath() (string, error) { return resolvePathOrDefault() }
+
+// Save serialises cfg back to the given path, creating the parent directory
+// if needed. Note: TOML encoding loses comments — original annotations in a
+// hand-edited config will not survive a save.
+func Save(cfg Config, path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return toml.NewEncoder(f).Encode(cfg)
 }
 
 // Load reads and validates the configuration file.
@@ -68,6 +101,23 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// resolvePathOrDefault is like resolvePath but returns a default path even
+// when no config file exists yet. Used by Save when the user is creating
+// a connection from inside the TUI.
+func resolvePathOrDefault() (string, error) {
+	if p := os.Getenv("DBVIEWER_CONFIG"); p != "" {
+		return p, nil
+	}
+	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
+		return filepath.Join(x, "dbviewer", "config.toml"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("dbviewer: cannot resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".config", "dbviewer", "config.toml"), nil
 }
 
 // resolvePath returns the config file path using the lookup order defined in the design.

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -12,7 +14,9 @@ import (
 	"github.com/gabiito/db-viewer/internal/ai"
 	"github.com/gabiito/db-viewer/internal/config"
 	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/db-viewer/internal/secrets"
 	"github.com/gabiito/db-viewer/internal/tui"
+	"github.com/gabiito/db-viewer/internal/views"
 )
 
 // App is the Bubbletea root model for db-viewer.
@@ -35,11 +39,32 @@ type App struct {
 	schemaBrow   tui.SchemaBrowserModel
 	dataViewer   tui.DataViewerModel
 	cellEdit     tui.CellEditModel
-	sqlPanel     tui.SqlPanelModel
+	sqlBar       tui.SqlBarModel
 	askPanel     tui.AskPanelModel
 	confirm      tui.ConfirmModel
+	stagedView   tui.StagedViewModel
+	joinWizard   tui.JoinWizardModel
+	joinChoice   tui.JoinChoiceModel
+	viewsList    tui.ViewsListModel
+	saveView     tui.SaveViewModel
+	addConn      tui.AddConnectionModel
 	statusBar    tui.StatusBarModel
 	spinner      spinner.Model
+
+	viewsStore *views.Store
+	configPath string // resolved at startup, used to persist new connections
+	lastSQL    string
+
+	// Pending password / DSN template captured between AddConnectionSubmit
+	// and the testConnResult callback. The password lives only in memory
+	// for the duration of the test.
+	pendingPassword    string
+	pendingTemplateDSN string
+
+	// joinChain mirrors the JOIN sequence currently materialized in the data
+	// viewer (alias + table per step). Empty when no wizard-built JOIN is
+	// active. Reset when a regular table is opened.
+	joinChain []joinChainStep
 
 	// Current active connection name (for messages)
 	connName string
@@ -68,15 +93,37 @@ func NewApp(cfg config.Config, log *slog.Logger) *App {
 
 	provider := ai.New(aiCfg)
 
+	store, err := views.NewStore()
+	if err != nil {
+		log.Warn("views store unavailable", "err", err)
+	}
+
+	configPath, err := config.ResolvePath()
+	if err != nil {
+		log.Warn("config path resolution failed", "err", err)
+	}
+
+	if !secrets.Available() {
+		log.Warn("OS keyring not reachable — new connections that need a password will fail to persist; use dsn_env in config.toml as a fallback")
+	}
+	for _, c := range cfg.Connections {
+		if secrets.LooksLikePlaintextPassword(c.Engine, c.DSN) {
+			log.Warn("plaintext password detected in config", "connection", c.Name, "advice", "re-add this connection via 'n' so the password moves to the OS keyring, or replace dsn with dsn_env")
+		}
+	}
+
 	return &App{
-		cfg:      cfg,
-		log:      log,
-		ai:       provider,
-		edit:     &EditBuffer{},
-		exec:     &Executor{},
-		screen:   ScreenConnPicker,
-		inflight: make(map[string]context.CancelFunc),
-		spinner:  s,
+		cfg:        cfg,
+		log:        log,
+		ai:         provider,
+		edit:       &EditBuffer{},
+		exec:       &Executor{},
+		screen:     ScreenConnPicker,
+		inflight:   make(map[string]context.CancelFunc),
+		spinner:    s,
+		sqlBar:     tui.NewSqlBarModel(80),
+		viewsStore: store,
+		configPath: configPath,
 	}
 }
 
@@ -163,6 +210,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Schema is already stored in cache by the cmd; transition to schema browser
 			a.screen = ScreenSchemaBrowser
 			a.schemaBrow = tui.NewSchemaBrowserModel(a.cache.Tables(), &a.cache, a.width, a.height)
+			a.refreshSqlBarSchema()
 		}
 
 	case tui.OpenTableMsg:
@@ -170,6 +218,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.screen = ScreenDataViewer
 			pageSize := 50
 			a.dataViewer = tui.NewDataViewerModel(msg.Table, pageSize, a.width, a.height)
+			a.joinChain = nil // opening a table abandons any prior JOIN chain
 			// Load initial data
 			cmds = append(cmds, a.queryCmd(msg.Table, 0, pageSize))
 		}
@@ -238,9 +287,179 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Delete tx is open — store for confirmation
 		a.pendingTx = msg.tx
 
+	case txCommittedMsg:
+		if msg.Err != nil {
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[db] commit: %v", msg.Err)))
+		} else {
+			a.edit.Clear()
+			cmds = append(cmds, a.statusBar.SetMsg("changes saved"))
+			if cmd := a.refreshCurrentTable(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+
+	case txRolledBackMsg:
+		if msg.Err != nil {
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[db] rollback: %v", msg.Err)))
+		} else {
+			a.edit.Clear()
+			cmds = append(cmds, a.statusBar.SetMsg("changes discarded"))
+		}
+
 	case tui.SqlExecuteMsg:
+		a.lastSQL = msg.SQL
 		cmds = append(cmds, a.execSQLCmd(msg.SQL))
 		a.screen = ScreenDataViewer
+
+	case tui.JoinExecMsg:
+		a.modal = ModalNone
+		a.lastSQL = msg.SQL
+		if msg.AppendedTable != "" {
+			// Extend mode: append to the existing chain.
+			a.joinChain = append(a.joinChain, joinChainStep{tableName: msg.AppendedTable, alias: msg.AppendedAlias})
+		} else if tbl := a.dataViewer.Table(); tbl != nil {
+			// Fresh JOIN from a base table — reset chain to [base, picked-right].
+			// We don't know the picked-right name from the message in fresh mode,
+			// but the wizard built SQL `FROM left a JOIN right b`, so the chain
+			// after the first wizard run is parsed from the chain bookkeeping
+			// the wizard didn't expose. Pragmatic approach: reset to just the
+			// base table and let the next extension start fresh aliases. (b)
+			a.joinChain = []joinChainStep{{tableName: tbl.Name, alias: "a"}}
+			// The chain still needs the right table; we infer from msg.SQL by
+			// extracting the first JOIN target.
+			if rt := firstJoinedTable(msg.SQL); rt != "" {
+				a.joinChain = append(a.joinChain, joinChainStep{tableName: rt, alias: "b"})
+			}
+		}
+		cmds = append(cmds, a.execSQLCmd(msg.SQL))
+		cmds = append(cmds, a.statusBar.SetMsg("running JOIN…"))
+
+	case tui.JoinCancelMsg:
+		a.modal = ModalNone
+
+	case tui.JoinChoiceMsg:
+		switch {
+		case msg.Add:
+			// Extend: open wizard pre-filled with last chain table as LEFT.
+			last := a.joinChain[len(a.joinChain)-1]
+			leftTbl := a.cache.Table(last.tableName)
+			if leftTbl == nil {
+				cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[join] last chain table %q missing from schema", last.tableName)))
+				a.modal = ModalNone
+			} else {
+				a.joinWizard = tui.NewJoinWizardModelExtend(
+					leftTbl, &a.cache, a.lastSQL, last.alias, a.nextJoinAlias(),
+					a.width, a.height,
+				)
+				a.modal = ModalJoinWizard
+			}
+		case msg.Replace:
+			// Replace: clear chain, open wizard fresh on the data viewer's
+			// current table. If the viewer has no table (derived results),
+			// fall back to canceling.
+			a.joinChain = nil
+			if tbl := a.dataViewer.Table(); tbl != nil {
+				a.joinWizard = tui.NewJoinWizardModel(tbl, &a.cache, a.width, a.height)
+				a.modal = ModalJoinWizard
+			} else {
+				a.modal = ModalNone
+				cmds = append(cmds, a.statusBar.SetMsg("no base table — open one first to start a fresh JOIN"))
+			}
+		default:
+			a.modal = ModalNone
+		}
+
+	case tui.RunViewMsg:
+		a.modal = ModalNone
+		a.lastSQL = msg.SQL
+		a.screen = ScreenDataViewer
+		cmds = append(cmds, a.execSQLCmd(msg.SQL))
+
+	case tui.DeleteViewMsg:
+		if a.viewsStore != nil {
+			if err := a.viewsStore.Remove(msg.Name); err != nil {
+				cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[views] delete: %v", err)))
+			} else {
+				cmds = append(cmds, a.statusBar.SetMsg("view deleted: "+msg.Name))
+				a.viewsList = tui.NewViewsListModel(a.loadViewItems(), a.width, a.height)
+			}
+		}
+
+	case tui.CloseViewsMsg:
+		a.modal = ModalNone
+
+	case tui.SaveViewSubmitMsg:
+		a.modal = ModalNone
+		if a.viewsStore == nil {
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[views] store unavailable")))
+		} else if err := a.viewsStore.Add(views.View{Name: msg.Name, SQL: msg.SQL}); err != nil {
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[views] save: %v", err)))
+		} else {
+			cmds = append(cmds, a.statusBar.SetMsg("view saved: "+msg.Name))
+		}
+
+	case tui.SaveViewCancelMsg:
+		a.modal = ModalNone
+
+	case tui.AddConnectionSubmitMsg:
+		// Don't save yet — verify the connection works first.
+		// If a separate password was supplied, inject it (URL-encoded) into the
+		// DSN before testing.
+		conn := msg.Connection
+		if msg.Password != "" {
+			full, err := secrets.InjectPassword(conn.Engine, conn.DSN, msg.Password)
+			if err != nil {
+				a.addConn.SetError(err.Error())
+				break
+			}
+			conn.DSN = full
+		}
+		a.pendingPassword = msg.Password
+		a.pendingTemplateDSN = msg.Connection.DSN // remember the user-typed (no-password) DSN
+		a.addConn.SetTesting(true)
+		cmds = append(cmds, a.testConnectionCmd(conn))
+
+	case testConnResultMsg:
+		a.addConn.SetTesting(false)
+		if msg.err != nil {
+			a.addConn.SetTestError(msg.err.Error())
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[conn-test] %s: %v", msg.conn.Name, msg.err)))
+			a.pendingPassword = ""
+			a.pendingTemplateDSN = ""
+			break
+		}
+		// Test passed — split out any password into the keyring, then persist.
+		toSave, err := a.persistConnection(msg.conn)
+		if err != nil {
+			a.addConn.SetError(err.Error())
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[secrets] %v", err)))
+			a.pendingPassword = ""
+			a.pendingTemplateDSN = ""
+			break
+		}
+		a.pendingPassword = ""
+		a.pendingTemplateDSN = ""
+		a.cfg.Connections = append(a.cfg.Connections, toSave)
+		if a.configPath == "" {
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] no path resolved — connection added in-memory only")))
+		} else if err := config.Save(a.cfg, a.configPath); err != nil {
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err)))
+		} else {
+			suffix := ""
+			if toSave.KeyringKey != "" {
+				suffix = " (password stored in OS keyring)"
+			}
+			cmds = append(cmds, a.statusBar.SetMsg("connection saved: "+toSave.Name+suffix))
+		}
+		a.modal = ModalNone
+		if a.screen == ScreenConnPicker {
+			a.connPicker = tui.NewConnPickerModel(a.cfg.Connections, a.width, a.height)
+		}
+
+	case tui.AddConnectionCancelMsg:
+		a.pendingPassword = ""
+		a.pendingTemplateDSN = ""
+		a.modal = ModalNone
 
 	case tui.AskSubmitMsg:
 		cmds = append(cmds, a.askAICmd(msg.Question))
@@ -286,7 +505,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 	var cmds []tea.Cmd
 
-	// Modal takes priority
+	// Modal takes priority over everything else.
 	if a.modal != ModalNone {
 		switch a.modal {
 		case ModalCellEdit:
@@ -301,6 +520,84 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 			var cmd tea.Cmd
 			a.dataViewer, cmd = a.dataViewer.UpdateCellView(msg)
 			cmds = append(cmds, cmd)
+		case ModalJoinWizard:
+			var cmd tea.Cmd
+			a.joinWizard, cmd = a.joinWizard.Update(msg)
+			cmds = append(cmds, cmd)
+		case ModalJoinChoice:
+			var cmd tea.Cmd
+			a.joinChoice, cmd = a.joinChoice.Update(msg)
+			cmds = append(cmds, cmd)
+		case ModalViewsList:
+			var cmd tea.Cmd
+			a.viewsList, cmd = a.viewsList.Update(msg)
+			cmds = append(cmds, cmd)
+		case ModalSaveView:
+			var cmd tea.Cmd
+			a.saveView, cmd = a.saveView.Update(msg)
+			cmds = append(cmds, cmd)
+		case ModalAddConnection:
+			var cmd tea.Cmd
+			a.addConn, cmd = a.addConn.Update(msg)
+			cmds = append(cmds, cmd)
+		case ModalStagedView:
+			handled := false
+			if keyMsg, ok := msg.(tea.KeyMsg); ok {
+				switch keyMsg.String() {
+				case "esc", "q":
+					a.modal = ModalNone
+					handled = true
+				case "s":
+					a.modal = ModalNone
+					if len(a.edit.Changes()) > 0 {
+						cmds = append(cmds, a.applyEditsCmd())
+					}
+					handled = true
+				case "D":
+					a.modal = ModalNone
+					cmds = append(cmds, a.discardStagedCmd())
+					handled = true
+				}
+			}
+			if !handled {
+				var cmd tea.Cmd
+				a.stagedView, cmd = a.stagedView.Update(msg)
+				cmds = append(cmds, cmd)
+			}
+		}
+		return tea.Batch(cmds...)
+	}
+
+	// SQL bar focus takes priority over screen routing once no modal is open.
+	if a.sqlBar.IsFocused() {
+		isTab := false
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			switch keyMsg.String() {
+			case "esc":
+				a.sqlBar.Blur()
+				return tea.Batch(cmds...)
+			case "enter":
+				sql := strings.TrimSpace(a.sqlBar.Value())
+				a.sqlBar.Blur()
+				if sql != "" {
+					a.sqlBar.Clear()
+					a.screen = ScreenDataViewer
+					cmds = append(cmds, a.execSQLCmd(sql))
+				}
+				return tea.Batch(cmds...)
+			case "tab":
+				isTab = true
+			}
+		}
+		var cmd tea.Cmd
+		a.sqlBar, cmd = a.sqlBar.Update(msg)
+		cmds = append(cmds, cmd)
+		if isTab {
+			if cur, idx, total := a.sqlBar.CurrentCompletion(); cur != "" {
+				cmds = append(cmds, a.statusBar.SetMsg(fmt.Sprintf("completion %d/%d: %s — Tab cycles", idx, total, cur)))
+			} else {
+				cmds = append(cmds, a.statusBar.SetMsg("no completions for the current word"))
+			}
 		}
 		return tea.Batch(cmds...)
 	}
@@ -311,10 +608,34 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 		var cmd tea.Cmd
 		a.connPicker, cmd = a.connPicker.Update(msg)
 		cmds = append(cmds, cmd)
+		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "n" {
+			a.addConn = tui.NewAddConnectionModel(a.width, a.height)
+			a.modal = ModalAddConnection
+		}
 	case ScreenSchemaBrowser:
 		var cmd tea.Cmd
 		a.schemaBrow, cmd = a.schemaBrow.Update(msg)
 		cmds = append(cmds, cmd)
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			switch keyMsg.String() {
+			case "esc":
+				a.screen = ScreenConnPicker
+			case "s":
+				if len(a.edit.Changes()) > 0 {
+					cmds = append(cmds, a.applyEditsCmd())
+				}
+			case "S":
+				a.stagedView = tui.NewStagedViewModel(a.edit.Diff(), len(a.edit.Changes()), a.width, a.height)
+				a.modal = ModalStagedView
+			case "D":
+				cmds = append(cmds, a.discardStagedCmd())
+			case ":":
+				cmds = append(cmds, a.sqlBar.Focus())
+			case "V":
+				a.viewsList = tui.NewViewsListModel(a.loadViewItems(), a.width, a.height)
+				a.modal = ModalViewsList
+			}
+		}
 	case ScreenDataViewer:
 		var cmd tea.Cmd
 		a.dataViewer, cmd = a.dataViewer.Update(msg)
@@ -326,9 +647,31 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 				if len(a.edit.Changes()) > 0 {
 					cmds = append(cmds, a.applyEditsCmd())
 				}
-			case ":": // open SQL panel
-				a.screen = ScreenSqlPanel
-				a.sqlPanel = tui.NewSqlPanelModel(a.width, a.height)
+			case "S": // show staged-changes modal
+				a.stagedView = tui.NewStagedViewModel(a.edit.Diff(), len(a.edit.Changes()), a.width, a.height)
+				a.modal = ModalStagedView
+			case "J": // open the join-wizard modal (or choice if a chain is active)
+				if len(a.joinChain) >= 2 {
+					a.joinChoice = tui.NewJoinChoiceModel(a.joinChainTables(), a.width, a.height)
+					a.modal = ModalJoinChoice
+				} else if tbl := a.dataViewer.Table(); tbl != nil {
+					a.joinWizard = tui.NewJoinWizardModel(tbl, &a.cache, a.width, a.height)
+					a.modal = ModalJoinWizard
+				}
+			case "V": // open the saved-views list
+				a.viewsList = tui.NewViewsListModel(a.loadViewItems(), a.width, a.height)
+				a.modal = ModalViewsList
+			case "W": // save the last-run SQL as a named view
+				if a.lastSQL == "" {
+					cmds = append(cmds, a.statusBar.SetMsg("nothing to save — run SQL or a join first"))
+				} else {
+					a.saveView = tui.NewSaveViewModel(a.lastSQL, a.width, a.height)
+					a.modal = ModalSaveView
+				}
+			case "D": // discard all staged changes
+				cmds = append(cmds, a.discardStagedCmd())
+			case ":": // focus the inline SQL bar
+				cmds = append(cmds, a.sqlBar.Focus())
 			case "ctrl+a", "f2": // open AI ask panel
 				a.screen = ScreenAskPanel
 				a.askPanel = tui.NewAskPanelModel(a.ai.Enabled(), a.width, a.height)
@@ -337,20 +680,42 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 					a.dataViewer.OpenCellView(row, col)
 					a.modal = ModalCellView
 				}
-			case "enter": // edit cell
+			case "enter": // edit cell under cursor
 				if row, col, ok := a.dataViewer.SelectedCell(); ok {
 					table := a.dataViewer.Table()
-					if len(table.PKCols) == 0 {
+					if table == nil {
+						cmds = append(cmds, a.statusBar.SetMsg("derived results — open a table to edit"))
+					} else if len(table.PKCols) == 0 {
 						cmds = append(cmds, a.statusBar.SetMsg("table has no primary key — read-only"))
 					} else {
-						a.cellEdit = tui.NewCellEditModel(row, col, a.dataViewer.CellValue(row, col))
-						a.modal = ModalCellEdit
+						colName := a.dataViewer.ColumnName(col)
+						var colDef db.Column
+						found := false
+						for _, c := range table.Columns {
+							if c.Name == colName {
+								colDef = c
+								found = true
+								break
+							}
+						}
+						if !found {
+							cmds = append(cmds, a.statusBar.SetMsg("column not in schema — cannot edit"))
+						} else if colDef.IsPK {
+							cmds = append(cmds, a.statusBar.SetMsg("cannot edit primary key column"))
+						} else {
+							pk := a.dataViewer.RowPK(row)
+							a.cellEdit = tui.NewCellEditModel(row, col, a.dataViewer.CellValue(row, col)).
+								WithTableContext(table, colDef, pk)
+							a.modal = ModalCellEdit
+						}
 					}
 				}
 			case "d": // delete row
 				if row, ok := a.dataViewer.SelectedRow(); ok {
 					table := a.dataViewer.Table()
-					if len(table.PKCols) == 0 {
+					if table == nil {
+						cmds = append(cmds, a.statusBar.SetMsg("derived results — open a table to delete"))
+					} else if len(table.PKCols) == 0 {
 						cmds = append(cmds, a.statusBar.SetMsg("table has no primary key — read-only"))
 					} else {
 						pk := a.dataViewer.RowPK(row)
@@ -364,20 +729,12 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 					}
 				}
 			case "esc":
-				// Cancel in-flight requests
+				// Cancel any in-flight requests and go back to the schema browser.
 				for id, cancel := range a.inflight {
 					cancel()
 					delete(a.inflight, id)
 				}
-			}
-		}
-	case ScreenSqlPanel:
-		var cmd tea.Cmd
-		a.sqlPanel, cmd = a.sqlPanel.Update(msg)
-		cmds = append(cmds, cmd)
-		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "esc" {
-			if !a.sqlPanel.IsActive() {
-				a.screen = ScreenDataViewer
+				a.screen = ScreenSchemaBrowser
 			}
 		}
 	case ScreenAskPanel:
@@ -396,26 +753,66 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 
 // View implements tea.Model.
 func (a *App) View() string {
-	if a.width == 0 {
+	if a.width == 0 || a.height == 0 {
 		return "Loading..."
 	}
 
-	var body string
+	// Chrome at the bottom (always pinned): help line + status line.
+	spinnerLine := ""
+	if len(a.inflight) > 0 {
+		spinnerLine = a.spinner.View() + " working…"
+	}
+	statusLine := a.statusBar.View()
+	if spinnerLine != "" {
+		statusLine = lipgloss.JoinHorizontal(lipgloss.Left,
+			a.statusBar.View(),
+			" ",
+			spinnerLine,
+		)
+	}
+	helpLine := tui.RenderHelpBar(a.helpContext(), a.width, a.ai.Enabled())
 
+	chromeBeneath := lipgloss.Height(helpLine) + lipgloss.Height(statusLine)
+	bodyHeight := a.height - chromeBeneath
+	if bodyHeight < 3 {
+		bodyHeight = 3
+	}
+
+	// Tell screens that respect a height budget how much they have. The data
+	// viewer uses this to compute how many rows fit; the staged banner above
+	// and the SQL bar below each eat lines when present.
+	stagedBannerLines := 0
+	if len(a.edit.Changes()) > 0 {
+		stagedBannerLines = 1
+	}
+	a.sqlBar.SetWidth(a.width)
+	sqlBarLines := 0
+	if a.screen == ScreenDataViewer || a.screen == ScreenSchemaBrowser {
+		sqlBarLines = a.sqlBar.Height()
+	}
+	innerHeight := bodyHeight - stagedBannerLines - sqlBarLines
+	a.dataViewer.SetWidth(a.width)
+	a.dataViewer.SetHeight(innerHeight)
+	a.applyJoinLegend()
+	if a.screen == ScreenSchemaBrowser {
+		a.schemaBrow.SetSize(a.width, innerHeight)
+	}
+
+	var body string
 	switch a.screen {
 	case ScreenConnPicker:
 		body = a.connPicker.View()
 	case ScreenSchemaBrowser:
-		body = a.schemaBrow.View()
+		body = a.prependStagedBanner(a.schemaBrow.View()) + "\n" + a.sqlBar.View()
 	case ScreenDataViewer:
-		body = a.dataViewer.View()
-	case ScreenSqlPanel:
-		body = a.sqlPanel.View()
+		body = a.prependStagedBanner(a.dataViewer.View()) + "\n" + a.sqlBar.View()
 	case ScreenAskPanel:
 		body = a.askPanel.View()
 	}
 
-	// Modal overlay
+	// Modal overlay — centered within the body area, replacing whatever was
+	// rendered underneath. This guarantees the modal is fully visible and
+	// the help/status lines below stay pinned.
 	if a.modal != ModalNone {
 		var overlay string
 		switch a.modal {
@@ -425,46 +822,120 @@ func (a *App) View() string {
 			overlay = a.confirm.View()
 		case ModalCellView:
 			overlay = a.dataViewer.CellViewView()
+		case ModalStagedView:
+			overlay = a.stagedView.View()
+		case ModalJoinWizard:
+			overlay = a.joinWizard.View()
+		case ModalJoinChoice:
+			overlay = a.joinChoice.View()
+		case ModalViewsList:
+			overlay = a.viewsList.View()
+		case ModalSaveView:
+			overlay = a.saveView.View()
+		case ModalAddConnection:
+			overlay = a.addConn.View()
 		}
-		body = renderOverlay(body, overlay, a.width, a.height)
+		body = lipgloss.Place(a.width, bodyHeight, lipgloss.Center, lipgloss.Center, overlay)
 	}
 
-	// Spinner when in-flight
-	spinnerLine := ""
-	if len(a.inflight) > 0 {
-		spinnerLine = a.spinner.View() + " working…"
-	}
+	// Constrain the body so help/status are pinned to the bottom of the
+	// terminal regardless of how tall the body would naturally render.
+	body = lipgloss.NewStyle().
+		Height(bodyHeight).
+		MaxHeight(bodyHeight).
+		Render(body)
 
-	statusLine := a.statusBar.View()
-	if spinnerLine != "" {
-		statusLine = lipgloss.JoinHorizontal(lipgloss.Left,
-			a.statusBar.View(),
-			" ",
-			spinnerLine,
-		)
-	}
-
-	return lipgloss.JoinVertical(lipgloss.Left, body, statusLine)
+	return lipgloss.JoinVertical(lipgloss.Left, body, helpLine, statusLine)
 }
 
-// renderOverlay places an overlay string on top of the base view.
-func renderOverlay(base, overlay string, width, height int) string {
-	// Simple implementation: render overlay below base content
-	// A more sophisticated version would center it
-	_ = width
-	_ = height
-	return base + "\n" + overlay
+// discardStagedCmd clears the edit buffer immediately and returns a status
+// message. Triggered by the 'D' shortcut from any screen or modal.
+func (a *App) discardStagedCmd() tea.Cmd {
+	n := len(a.edit.Changes())
+	if n == 0 {
+		return a.statusBar.SetMsg("no staged changes to discard")
+	}
+	a.edit.Clear()
+	word := "change"
+	if n != 1 {
+		word = "changes"
+	}
+	return a.statusBar.SetMsg(fmt.Sprintf("discarded %d %s", n, word))
+}
+
+// prependStagedBanner adds the yellow "N changes staged" banner above the body
+// when the edit buffer has pending changes. Used by both the data viewer and
+// the schema browser so the staged status is visible across navigation.
+func (a *App) prependStagedBanner(body string) string {
+	n := len(a.edit.Changes())
+	if n == 0 {
+		return body
+	}
+	word := "change"
+	if n != 1 {
+		word = "changes"
+	}
+	banner := tui.StyleBannerYellow.Render(
+		fmt.Sprintf("✎ %d %s staged — 's' save · 'S' review", n, word),
+	)
+	return banner + "\n" + body
+}
+
+// helpContext maps the current screen/modal state to a tui.HelpContext.
+// The modal takes priority over the SQL bar, which takes priority over the
+// active screen.
+func (a *App) helpContext() tui.HelpContext {
+	switch a.modal {
+	case ModalCellEdit:
+		return tui.HelpContextModalCellEdit
+	case ModalConfirm:
+		return tui.HelpContextModalConfirm
+	case ModalCellView:
+		return tui.HelpContextModalCellView
+	case ModalStagedView:
+		return tui.HelpContextModalStagedView
+	case ModalJoinWizard:
+		return tui.HelpContextModalJoinWizard
+	case ModalJoinChoice:
+		return tui.HelpContextModalJoinChoice
+	case ModalViewsList:
+		return tui.HelpContextModalViewsList
+	case ModalSaveView:
+		return tui.HelpContextModalSaveView
+	case ModalAddConnection:
+		return tui.HelpContextModalAddConnection
+	}
+	if a.sqlBar.IsFocused() {
+		return tui.HelpContextSqlBarFocused
+	}
+	switch a.screen {
+	case ScreenSchemaBrowser:
+		return tui.HelpContextSchemaBrowser
+	case ScreenDataViewer:
+		return tui.HelpContextDataViewer
+	case ScreenAskPanel:
+		return tui.HelpContextAskPanel
+	}
+	return tui.HelpContextConnPicker
 }
 
 // ---- Async command builders ----
 
-// connectCmd connects to the given connection profile.
+// connectCmd connects to the given connection profile. The DSN is resolved
+// via secrets.ResolveDSN, which substitutes the password from the OS
+// keyring or reads the entire DSN from an env var when configured.
 func (a *App) connectCmd(conn config.Connection) tea.Cmd {
 	reqID := newReqID()
 	ctx, cancel := context.WithCancel(context.Background())
 	a.inflight[reqID] = cancel
 
-	// Find or create a driver
+	resolvedDSN, err := secrets.ResolveDSN(conn.Engine, conn.DSN, conn.KeyringKey, conn.DSNEnv)
+	if err != nil {
+		cancel()
+		delete(a.inflight, reqID)
+		return a.statusBar.SetErr(fmt.Errorf("[config] %s: %v", conn.Name, err))
+	}
+
 	drv, err := db.New(conn.Engine)
 	if err != nil {
 		cancel()
@@ -474,7 +945,7 @@ func (a *App) connectCmd(conn config.Connection) tea.Cmd {
 	a.drv = drv
 
 	return func() tea.Msg {
-		err := drv.Connect(ctx, conn.DSN)
+		err := drv.Connect(ctx, resolvedDSN)
 		return ConnectedMsg{ReqID: reqID, ConnName: conn.Name, Err: err}
 	}
 }
@@ -558,24 +1029,229 @@ type deleteReadyMsg struct {
 	tx db.Tx
 }
 
+// txCommittedMsg is emitted after Commit returns. The Update handler is
+// responsible for clearing the edit buffer and refreshing the data viewer.
+type txCommittedMsg struct{ Err error }
+
+// txRolledBackMsg is emitted after Rollback returns.
+type txRolledBackMsg struct{ Err error }
+
 // commitCmd commits a pending transaction.
 func (a *App) commitCmd(tx db.Tx) tea.Cmd {
 	return func() tea.Msg {
-		if err := tx.Commit(context.Background()); err != nil {
-			return ErrMsg{Source: "db", Err: err}
-		}
-		return DBExecDoneMsg{ReqID: "", RowsAffected: 1}
+		return txCommittedMsg{Err: tx.Commit(context.Background())}
 	}
 }
 
 // rollbackCmd rolls back a pending transaction.
 func (a *App) rollbackCmd(tx db.Tx) tea.Cmd {
 	return func() tea.Msg {
-		if err := tx.Rollback(context.Background()); err != nil {
-			return ErrMsg{Source: "db", Err: err}
-		}
-		return DBExecDoneMsg{ReqID: "", RowsAffected: 0}
+		return txRolledBackMsg{Err: tx.Rollback(context.Background())}
 	}
+}
+
+// joinChainStep records one entry in the active JOIN chain.
+type joinChainStep struct {
+	tableName string
+	alias     string
+}
+
+// applyJoinLegend pushes the joinChain summary into the data viewer as a
+// legend line, plus per-column alias prefixes when the column count matches
+// the chain's tables (the unambiguous SELECT * case).
+func (a *App) applyJoinLegend() {
+	if len(a.joinChain) < 2 {
+		a.dataViewer.SetLegend("")
+		a.dataViewer.SetColumnPrefixes(nil)
+		return
+	}
+
+	parts := make([]string, len(a.joinChain))
+	expected := 0
+	for i, step := range a.joinChain {
+		parts[i] = step.alias + "=" + step.tableName
+		if t := a.cache.Table(step.tableName); t != nil {
+			expected += len(t.Columns)
+		}
+	}
+	a.dataViewer.SetLegend(strings.Join(parts, " · "))
+
+	if expected == a.dataViewer.ResultSetColumnCount() {
+		prefixes := make([]string, 0, expected)
+		for _, step := range a.joinChain {
+			t := a.cache.Table(step.tableName)
+			if t == nil {
+				continue
+			}
+			for range t.Columns {
+				prefixes = append(prefixes, step.alias)
+			}
+		}
+		a.dataViewer.SetColumnPrefixes(prefixes)
+	} else {
+		// Specific cols path — column-to-alias mapping isn't unambiguous.
+		a.dataViewer.SetColumnPrefixes(nil)
+	}
+}
+
+// firstJoinedTable extracts the table name immediately following the first
+// `JOIN` keyword in a SQL string. Returns "" when no JOIN is found. Naive —
+// expects the SQL to have come from the wizard (no quoted identifiers etc.).
+func firstJoinedTable(sql string) string {
+	upper := strings.ToUpper(sql)
+	idx := strings.Index(upper, " JOIN ")
+	if idx < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(sql[idx+len(" JOIN "):])
+	// Read one identifier token.
+	for i := 0; i < len(rest); i++ {
+		c := rest[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return rest[:i]
+		}
+	}
+	return rest
+}
+
+// joinChainTables returns the chain's table names in order.
+func (a *App) joinChainTables() []string {
+	out := make([]string, len(a.joinChain))
+	for i, s := range a.joinChain {
+		out[i] = s.tableName
+	}
+	return out
+}
+
+// nextJoinAlias returns the alias to use for the next JOIN step (a, b, c, …).
+func (a *App) nextJoinAlias() string {
+	return string(rune('a' + len(a.joinChain)))
+}
+
+// loadViewItems fetches saved views from the store as TUI items. Errors are
+// surfaced via the status bar and the modal opens with an empty list.
+func (a *App) loadViewItems() []tui.ViewItem {
+	if a.viewsStore == nil {
+		return nil
+	}
+	saved, err := a.viewsStore.Load()
+	if err != nil {
+		a.log.Warn("views load failed", "err", err)
+		return nil
+	}
+	items := make([]tui.ViewItem, len(saved))
+	for i, v := range saved {
+		items[i] = tui.ViewItem{Name: v.Name, SQL: v.SQL}
+	}
+	return items
+}
+
+// refreshSqlBarSchema rebuilds the SQL bar's autocomplete pools from the
+// current schema cache. Called after introspection completes.
+func (a *App) refreshSqlBarSchema() {
+	summaries := a.cache.Tables()
+	tables := make([]string, len(summaries))
+	cols := make(map[string][]string, len(summaries))
+	for i, ts := range summaries {
+		name := ts.Name
+		tables[i] = name
+		if t := a.cache.Table(name); t != nil {
+			colNames := make([]string, len(t.Columns))
+			for j, c := range t.Columns {
+				colNames[j] = c.Name
+			}
+			cols[name] = colNames
+		}
+	}
+	a.sqlBar.SetSchema(tables, cols)
+}
+
+// refreshCurrentTable re-queries the table currently shown in the data viewer.
+// Returns nil when there is no active table or driver.
+func (a *App) refreshCurrentTable() tea.Cmd {
+	tbl := a.dataViewer.Table()
+	if a.drv == nil || tbl == nil {
+		return nil
+	}
+	return a.queryCmd(tbl, 0, 50)
+}
+
+// testConnResultMsg carries the outcome of an add-connection test back to
+// Update so the modal can be dismissed (success) or annotated (failure).
+type testConnResultMsg struct {
+	conn config.Connection
+	err  error
+}
+
+// testConnectionCmd runs Connect + Ping against the proposed config in a
+// fresh driver, with a 5-second timeout. The driver is closed after the
+// probe regardless of outcome. The DSN is taken as-is from the form (with
+// the user-supplied password) — the keyring split happens AFTER a
+// successful test, in persistConnection.
+func (a *App) testConnectionCmd(conn config.Connection) tea.Cmd {
+	return func() tea.Msg {
+		drv, err := db.New(conn.Engine)
+		if err != nil {
+			return testConnResultMsg{conn: conn, err: err}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := drv.Connect(ctx, conn.DSN); err != nil {
+			return testConnResultMsg{conn: conn, err: err}
+		}
+		if err := drv.Ping(ctx); err != nil {
+			_ = drv.Close()
+			return testConnResultMsg{conn: conn, err: err}
+		}
+		_ = drv.Close()
+		return testConnResultMsg{conn: conn, err: nil}
+	}
+}
+
+// persistConnection prepares a connection for storage. There are two paths
+// depending on how the password was provided in the form:
+//
+//  1. Explicit password field (a.pendingPassword non-empty): the DSN was
+//     typed without a password. We inject the literal `{password}` placeholder
+//     and store the password in the keyring.
+//  2. No explicit password (a.pendingPassword empty): the DSN may contain
+//     an embedded password — split it via SplitDSN. SQLite and passwordless
+//     URLs have nothing to extract.
+//
+// Returns the connection that should actually be saved to TOML. The caller
+// is expected to clear a.pendingPassword and a.pendingTemplateDSN after.
+func (a *App) persistConnection(conn config.Connection) (config.Connection, error) {
+	if a.pendingPassword != "" {
+		template, err := secrets.InjectPlaceholder(conn.Engine, a.pendingTemplateDSN)
+		if err != nil {
+			return conn, fmt.Errorf("template build: %w", err)
+		}
+		keyringKey := secrets.KeyringKeyFor(conn.Name)
+		if err := secrets.SetPassword(keyringKey, a.pendingPassword); err != nil {
+			return conn, fmt.Errorf("OS keyring not available: %v\n\nPlaintext fallback is intentionally NOT used. Workarounds:\n  • Start your OS keyring service (gnome-keyring / KWallet on Linux)\n  • Or edit %s by hand to use:\n      dsn_env = \"YOURVAR\"\n    and export YOURVAR='<full DSN>' in your shell", err, a.configPath)
+		}
+		return config.Connection{
+			Name:       conn.Name,
+			Engine:     conn.Engine,
+			DSN:        template,
+			KeyringKey: keyringKey,
+		}, nil
+	}
+
+	template, password, has := secrets.SplitDSN(conn.Engine, conn.DSN)
+	if !has {
+		return conn, nil
+	}
+	keyringKey := secrets.KeyringKeyFor(conn.Name)
+	if err := secrets.SetPassword(keyringKey, password); err != nil {
+		return conn, fmt.Errorf("OS keyring not available: %v\n\nPlaintext fallback is intentionally NOT used. Workarounds:\n  • Start your OS keyring service (gnome-keyring / KWallet on Linux)\n  • Or edit %s by hand to use:\n      dsn_env = \"YOURVAR\"\n    and export YOURVAR='<full DSN>' in your shell", err, a.configPath)
+	}
+	return config.Connection{
+		Name:       conn.Name,
+		Engine:     conn.Engine,
+		DSN:        template,
+		KeyringKey: keyringKey,
+	}, nil
 }
 
 // reconnectCmd attempts to reconnect the active driver.
