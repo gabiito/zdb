@@ -10,14 +10,6 @@ import (
 	"github.com/gabiito/db-viewer/internal/db"
 )
 
-// TableSummary is a lightweight view of a table for the schema browser.
-type TableSummary struct {
-	Schema   string
-	Name     string
-	ColCount int
-	HasPK    bool
-}
-
 // SchemaCache holds the in-memory introspected schema for the active connection.
 // It is built once on connect and read throughout the session.
 type SchemaCache struct {
@@ -48,15 +40,15 @@ func (c *SchemaCache) Get() *db.Schema {
 }
 
 // Tables returns a lightweight summary list of all cached tables.
-func (c *SchemaCache) Tables() []TableSummary {
+func (c *SchemaCache) Tables() []db.TableSummary {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.schema == nil {
 		return nil
 	}
-	summaries := make([]TableSummary, len(c.schema.Tables))
+	summaries := make([]db.TableSummary, len(c.schema.Tables))
 	for i, t := range c.schema.Tables {
-		summaries[i] = TableSummary{
+		summaries[i] = db.TableSummary{
 			Schema:   t.Schema,
 			Name:     t.Name,
 			ColCount: len(t.Columns),

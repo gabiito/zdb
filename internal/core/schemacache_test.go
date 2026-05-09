@@ -58,6 +58,11 @@ func TestSchemaCacheBuild(t *testing.T) {
 	if len(got.Tables) != 3 {
 		t.Errorf("expected 3 tables, got %d", len(got.Tables))
 	}
+
+	summaries := cache.Tables()
+	if len(summaries) != 3 {
+		t.Errorf("Tables() expected 3 summaries, got %d", len(summaries))
+	}
 }
 
 func TestSchemaCacheGetReturnsPointer(t *testing.T) {

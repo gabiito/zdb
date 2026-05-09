@@ -47,6 +47,14 @@ type Schema struct {
 	Tables        []Table
 }
 
+// TableSummary is a lightweight view of a table for the schema browser and TUI.
+type TableSummary struct {
+	Schema   string
+	Name     string
+	ColCount int
+	HasPK    bool
+}
+
 // Cell holds a value as returned by Query. Nil => SQL NULL.
 // Renderers must format ColUnknown / ColBytes / ColJSON via fmt.Sprintf("%v", v).
 type Cell = any
