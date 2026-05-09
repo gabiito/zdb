@@ -228,6 +228,50 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tui.DiscardEditMsg:
 		a.modal = ModalNone
 
+	case applyReadyMsg:
+		// Edit apply succeeded; Tx is open — show diff for confirmation
+		a.pendingTx = msg.tx
+		a.confirm = tui.NewConfirmModel("Commit changes?\n"+msg.diff, false)
+		a.modal = ModalConfirm
+
+	case deleteReadyMsg:
+		// Delete tx is open — store for confirmation
+		a.pendingTx = msg.tx
+
+	case tui.SqlExecuteMsg:
+		cmds = append(cmds, a.execSQLCmd(msg.SQL))
+		a.screen = ScreenDataViewer
+
+	case tui.AskSubmitMsg:
+		cmds = append(cmds, a.askAICmd(msg.Question))
+
+	case AISuggestDoneMsg:
+		if _, live := a.inflight[msg.ReqID]; !live {
+			break
+		}
+		delete(a.inflight, msg.ReqID)
+		if msg.Err != nil {
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[ai] suggest: %v", msg.Err)))
+		}
+		// Truncation warning
+		if msg.Truncated {
+			cmds = append(cmds, a.statusBar.SetMsg("AI: schema truncated to 30 tables"))
+		}
+
+	case AIAskDoneMsg:
+		if _, live := a.inflight[msg.ReqID]; !live {
+			break
+		}
+		delete(a.inflight, msg.ReqID)
+		if msg.Err != nil {
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[ai] ask: %v", msg.Err)))
+		} else {
+			a.askPanel.SetPreview(msg.SQL)
+			if msg.Truncated {
+				cmds = append(cmds, a.statusBar.SetMsg("AI: schema truncated to 30 tables"))
+			}
+		}
+
 	default:
 		// Route to active screen / modal
 		var cmd tea.Cmd
@@ -546,6 +590,44 @@ func (a *App) reconnectCmd() tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// execSQLCmd executes a raw SQL statement. SELECTs update the data viewer;
+// non-SELECTs run in a transaction and require confirmation.
+func (a *App) execSQLCmd(sql string) tea.Cmd {
+	if a.drv == nil {
+		return a.statusBar.SetErr(fmt.Errorf("[db] not connected"))
+	}
+	drv := a.drv
+	reqID := newReqID()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.inflight[reqID] = cancel
+
+	return func() tea.Msg {
+		rs, err := drv.Query(ctx, sql)
+		if err != nil {
+			return ErrMsg{Source: "db", Err: err}
+		}
+		return DBQueryDoneMsg{ReqID: reqID, ResultSet: rs}
+	}
+}
+
+// askAICmd submits a natural-language question to the AI provider.
+func (a *App) askAICmd(question string) tea.Cmd {
+	if !a.ai.Enabled() {
+		return a.statusBar.SetMsg("configure AI to enable")
+	}
+	reqID := newReqID()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.inflight[reqID] = cancel
+
+	schema := a.cache.Get()
+	provider := a.ai
+
+	return func() tea.Msg {
+		sql, err := provider.Ask(ctx, schema, question)
+		return AIAskDoneMsg{ReqID: reqID, SQL: sql, Err: err}
+	}
 }
 
 // pingCmd pings the active driver.
