@@ -47,15 +47,33 @@ type DataViewerModel struct {
 	// Marked rows for multi-row copy. Keys are absolute indexes into
 	// resultSet.Rows. Empty map means no marks.
 	markedRows map[int]bool
+
+	// dbOffset is the offset of the first loaded row within the full
+	// result set on the database side. The App owns the canonical value;
+	// the viewer holds it only to render the absolute row range in the
+	// status line.
+	dbOffset int
+
+	// markAnchor is the row that anchors a Shift+Space range mark — the
+	// last row toggled with plain Space. -1 means no anchor exists yet.
+	markAnchor int
+
+	// totalRows is the total row count of the underlying table, fetched
+	// once via COUNT(*) when the table is opened. -1 means "unknown" and
+	// suppresses the "loaded/total" suffix in the status line — used for
+	// derived results from raw SQL or while the count is in flight.
+	totalRows int
 }
 
 // NewDataViewerModel creates a DataViewerModel for the given table.
 func NewDataViewerModel(t *db.Table, pageSize, width, height int) DataViewerModel {
 	return DataViewerModel{
-		tableRef: t,
-		pageSize: pageSize,
-		width:    width,
-		height:   height,
+		tableRef:   t,
+		pageSize:   pageSize,
+		width:      width,
+		height:     height,
+		markAnchor: -1,
+		totalRows:  -1,
 	}
 }
 
@@ -78,8 +96,9 @@ func (m *DataViewerModel) SetLegend(s string) { m.legend = s }
 // or a slice of a different length than the resultSet columns to disable.
 func (m *DataViewerModel) SetColumnPrefixes(prefixes []string) { m.colPrefixes = prefixes }
 
-// ToggleMark toggles the mark on the row currently under the cursor. No-op
-// when there's no result set or the cursor is out of range.
+// ToggleMark toggles the mark on the row currently under the cursor and
+// sets it as the anchor for the next Shift+Space range mark. No-op when
+// there's no result set or the cursor is out of range.
 func (m *DataViewerModel) ToggleMark() {
 	if m.resultSet == nil || len(m.resultSet.Rows) == 0 {
 		return
@@ -92,6 +111,38 @@ func (m *DataViewerModel) ToggleMark() {
 	} else {
 		m.markedRows[m.selectedRow] = true
 	}
+	m.markAnchor = m.selectedRow
+}
+
+// MarkRange marks every row between the current anchor and the cursor
+// (inclusive). When no anchor exists, falls back to a plain mark on the
+// current row. The anchor is left untouched so the user can extend the
+// range further from the same starting point.
+func (m *DataViewerModel) MarkRange() {
+	if m.resultSet == nil || len(m.resultSet.Rows) == 0 {
+		return
+	}
+	if m.markedRows == nil {
+		m.markedRows = make(map[int]bool)
+	}
+	if m.markAnchor < 0 {
+		m.markedRows[m.selectedRow] = true
+		m.markAnchor = m.selectedRow
+		return
+	}
+	a, b := m.markAnchor, m.selectedRow
+	if a > b {
+		a, b = b, a
+	}
+	if a < 0 {
+		a = 0
+	}
+	if b >= len(m.resultSet.Rows) {
+		b = len(m.resultSet.Rows) - 1
+	}
+	for r := a; r <= b; r++ {
+		m.markedRows[r] = true
+	}
 }
 
 // HasMarks reports whether any rows are currently marked.
@@ -100,8 +151,77 @@ func (m DataViewerModel) HasMarks() bool { return len(m.markedRows) > 0 }
 // MarkCount returns the number of marked rows.
 func (m DataViewerModel) MarkCount() int { return len(m.markedRows) }
 
-// ClearMarks removes all row marks.
-func (m *DataViewerModel) ClearMarks() { m.markedRows = nil }
+// ClearMarks removes all row marks and resets the range anchor.
+func (m *DataViewerModel) ClearMarks() {
+	m.markedRows = nil
+	m.markAnchor = -1
+}
+
+// MoveToTop puts the cursor on the first loaded row. Used after fetching
+// the next DB page so the user lands on the first new row.
+func (m *DataViewerModel) MoveToTop() {
+	m.selectedRow = 0
+}
+
+// MoveToBottom puts the cursor on the last loaded row. Used after fetching
+// the previous DB page so a backward Ctrl+b lands the user at the natural
+// continuation point.
+func (m *DataViewerModel) MoveToBottom() {
+	if m.resultSet != nil && len(m.resultSet.Rows) > 0 {
+		m.selectedRow = len(m.resultSet.Rows) - 1
+	}
+}
+
+// SetDBOffset records the offset of the loaded buffer within the full
+// result set. The App calls this when paginating so the status line
+// shows the absolute row range.
+func (m *DataViewerModel) SetDBOffset(offset int) {
+	m.dbOffset = offset
+}
+
+// SetTotalRows records the table's full row count so the status line can
+// show "loaded N / total T". Pass -1 to clear (e.g., when switching to a
+// derived result set).
+func (m *DataViewerModel) SetTotalRows(total int) {
+	m.totalRows = total
+}
+
+// LoadedRowCount returns the number of rows currently in the buffer.
+// Used by the App to compute the offset for the next page fetch when the
+// buffer has been extended by infinite-scroll appends.
+func (m DataViewerModel) LoadedRowCount() int {
+	if m.resultSet == nil {
+		return 0
+	}
+	return len(m.resultSet.Rows)
+}
+
+// AppendRows extends the current buffer with the rows from rs (which is
+// expected to share the same column shape). Cursor and marks stay where
+// they were — appending never shifts existing rows. No-op when there is
+// no current result set or rs is empty.
+func (m *DataViewerModel) AppendRows(rs *db.ResultSet) {
+	if rs == nil || m.resultSet == nil {
+		return
+	}
+	m.resultSet.Rows = append(m.resultSet.Rows, rs.Rows...)
+}
+
+// SetCursorRow places the cursor at the given absolute row, clamped to
+// the loaded range. Used by the App after an append fetch to advance the
+// cursor onto the first newly-loaded row.
+func (m *DataViewerModel) SetCursorRow(row int) {
+	if m.resultSet == nil || len(m.resultSet.Rows) == 0 {
+		return
+	}
+	if row < 0 {
+		row = 0
+	}
+	if row >= len(m.resultSet.Rows) {
+		row = len(m.resultSet.Rows) - 1
+	}
+	m.selectedRow = row
+}
 
 // MarkedRows returns the marked rows in ascending order by index. Returns nil
 // when no marks are set.
@@ -250,6 +370,7 @@ func (m *DataViewerModel) SetData(rs *db.ResultSet) {
 	}
 	m.firstVisibleCol = 0
 	m.markedRows = nil
+	m.markAnchor = -1
 	m.adjustHScroll()
 }
 
@@ -280,6 +401,10 @@ func (m DataViewerModel) Update(msg tea.Msg) (DataViewerModel, tea.Cmd) {
 	case "down", "j":
 		if m.selectedRow < nrows-1 {
 			m.selectedRow++
+		} else {
+			// At the last loaded row — infinite-scroll: request more rows
+			// to be appended to the buffer.
+			return m, func() tea.Msg { return WantNextPageAppendMsg{} }
 		}
 	case "left", "h":
 		if m.selectedCol > 0 {
@@ -296,11 +421,19 @@ func (m DataViewerModel) Update(msg tea.Msg) (DataViewerModel, tea.Cmd) {
 	case "G", "end":
 		m.selectedRow = nrows - 1
 	case "ctrl+f", "pgdown":
+		// At the last loaded row, ask the App to fetch the next DB page.
+		if m.selectedRow == nrows-1 {
+			return m, func() tea.Msg { return WantNextPageMsg{} }
+		}
 		m.selectedRow += m.visiblePageRows()
 		if m.selectedRow >= nrows {
 			m.selectedRow = nrows - 1
 		}
 	case "ctrl+b", "pgup":
+		// At the first loaded row, ask the App to fetch the previous DB page.
+		if m.selectedRow == 0 {
+			return m, func() tea.Msg { return WantPrevPageMsg{} }
+		}
 		m.selectedRow -= m.visiblePageRows()
 		if m.selectedRow < 0 {
 			m.selectedRow = 0
@@ -448,11 +581,19 @@ func (m DataViewerModel) View() string {
 	if n := len(m.markedRows); n > 0 {
 		marksSuffix = fmt.Sprintf(" · %d marked", n)
 	}
+	offsetSuffix := ""
+	if m.dbOffset > 0 {
+		offsetSuffix = fmt.Sprintf(" · DB offset %d", m.dbOffset)
+	}
+	loadedSuffix := ""
+	if m.totalRows >= 0 {
+		loadedSuffix = fmt.Sprintf(" · Loaded %d/%d", len(m.resultSet.Rows), m.totalRows)
+	}
 	sb.WriteString(StyleHelp.Render(fmt.Sprintf(
-		"Row %d/%d · Page %d/%d · Col %d/%d: %s%s%s",
+		"Row %d/%d · Page %d/%d · Col %d/%d: %s%s%s%s%s",
 		m.selectedRow+1, len(m.resultSet.Rows),
 		pageNum, totalPages,
-		m.selectedCol+1, totalCols, colName, colWindow, marksSuffix,
+		m.selectedCol+1, totalCols, colName, colWindow, loadedSuffix, marksSuffix, offsetSuffix,
 	)))
 
 	return sb.String()

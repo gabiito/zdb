@@ -145,24 +145,54 @@ is the highlights. Open the app and watch the bar to discover the rest.
 
 ### Data viewer
 
+Tables open with the first 50 rows loaded plus a `COUNT(*)` to show
+`Loaded N / total T` in the status line.
+
+**Navigation:**
+
 | Key | Action |
 |---|---|
 | `←↑↓→` or `hjkl` | Cell cursor |
-| `g` / `G` | Top / bottom of result set |
-| `Ctrl+f` / `Ctrl+b` | Page forward / back |
+| `g` / `G` | Top / bottom of loaded buffer |
 | `0` / `$` | First / last column |
+| `↓` / `j` at last loaded row | **Infinite scroll**: fetches next 50 rows and appends to the buffer; cursor lands on the first new row |
+| `Ctrl+f` / `Ctrl+b` | **Page replace**: jumps to next / previous DB page (50 rows, buffer is replaced) |
+
+**Row selection (multi-row copy):**
+
+| Key | Action |
+|---|---|
+| `Space` | Mark / unmark current row, sets the range anchor |
+| `M` or `Shift+Space` | Mark range from anchor to cursor (additive) |
+| `Esc` | Clears marks if any, else exits to schema browser |
+
+`Shift+Space` only works in terminals that send a distinct sequence for
+it (Kitty protocol or similar). `M` is the always-works fallback.
+
+**Clipboard:**
+
+| Key | Action |
+|---|---|
+| `y` | Copy current cell value |
+| `Y` | Copy current row (or all marked rows) as TSV with header |
+
+**Editing:**
+
+| Key | Action |
+|---|---|
 | `Enter` | Edit cell under cursor |
 | `v` | View full cell content (modal) |
-| `y` | Copy cell value to clipboard |
-| `Y` | Copy current row (or marked rows) as TSV with header |
-| `Space` | Mark / unmark current row |
 | `s` / `S` / `D` | Save / review / discard staged edits |
 | `d` | Delete row (red confirm) |
+
+**Other:**
+
+| Key | Action |
+|---|---|
 | `:` | Raw SQL bar |
 | `J` | Join wizard |
 | `V` / `W` | Saved views / save current SQL as view |
 | `Ctrl+a` or `F2` | Ask AI |
-| `Esc` | Clear marks (if any), else back |
 | `Ctrl+c` | Quit |
 
 ### Confirm modals

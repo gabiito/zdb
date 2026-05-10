@@ -67,3 +67,13 @@ type ConnectedMsg struct {
 	ConnName string
 	Err      error
 }
+
+// TableCountMsg carries the result of an async COUNT(*) issued when a
+// table is opened, so the data viewer can show "loaded N / total T" in
+// the status line.
+type TableCountMsg struct {
+	ReqID string
+	Table string
+	Total int
+	Err   error
+}

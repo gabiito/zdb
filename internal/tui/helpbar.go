@@ -90,6 +90,7 @@ func bindingsFor(ctx HelpContext, aiEnabled bool) []helpItem {
 			{keys: "y", desc: "copy cell"},
 			{keys: "Y", desc: "copy row(s) TSV"},
 			{keys: "Space", desc: "mark row"},
+			{keys: "M / Shift+Space", desc: "mark range"},
 			{keys: "s", desc: "save"},
 			{keys: "S", desc: "review staged"},
 			{keys: "D", desc: "discard staged"},

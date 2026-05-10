@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,6 +81,19 @@ type App struct {
 	// required) and the prompt's submit/cancel. Empty Name means no prompt
 	// is in flight.
 	pendingConnectConn config.Connection
+
+	// Database-level pagination state for the active table view.
+	// dbOffset is the offset of the FIRST row of the current buffer;
+	// pageDir is the direction of the in-flight page fetch (0 idle,
+	// +1 replace forward, -1 replace backward, +2 append forward — the
+	// infinite-scroll path triggered by ↓/j at the last buffer row).
+	// dbNextOffset is the offset that page-replace requests will commit
+	// once the result returns successfully (we cannot derive it post-hoc
+	// because the buffer length changes when the append path is used).
+	dbOffset     int
+	dbPageSize   int
+	pageDir      int
+	dbNextOffset int
 
 	// joinChain mirrors the JOIN sequence currently materialized in the data
 	// viewer (alias + table per step). Empty when no wizard-built JOIN is
@@ -280,12 +294,73 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tui.OpenTableMsg:
 		if msg.Table != nil {
 			a.screen = ScreenDataViewer
-			pageSize := 50
-			a.dataViewer = tui.NewDataViewerModel(msg.Table, pageSize, a.width, a.height)
+			a.dbPageSize = 50
+			a.dbOffset = 0
+			a.pageDir = 0
+			a.dataViewer = tui.NewDataViewerModel(msg.Table, a.dbPageSize, a.width, a.height)
+			a.dataViewer.SetDBOffset(0)
 			a.joinChain = nil // opening a table abandons any prior JOIN chain
-			// Load initial data
-			cmds = append(cmds, a.queryCmd(msg.Table, 0, pageSize))
+			// Kick off both the first page load AND a count query in parallel.
+			// The count is a one-shot per table-open and feeds the
+			// "Loaded N/T" display in the status line.
+			cmds = append(cmds, a.queryCmd(msg.Table, 0, a.dbPageSize))
+			cmds = append(cmds, a.countCmd(msg.Table))
 		}
+
+	case TableCountMsg:
+		if _, live := a.inflight[msg.ReqID]; !live {
+			break
+		}
+		delete(a.inflight, msg.ReqID)
+		if msg.Err != nil {
+			// Count failure isn't fatal — just leave the total unknown
+			// (the data viewer hides the suffix when totalRows < 0).
+			a.log.Warn("count failed", "table", msg.Table, "err", msg.Err)
+			break
+		}
+		// Only apply if the user is still on the same table — by the time
+		// the count returns they may have navigated elsewhere.
+		if tbl := a.dataViewer.Table(); tbl != nil && tbl.Name == msg.Table {
+			a.dataViewer.SetTotalRows(msg.Total)
+		}
+
+	case tui.WantNextPageMsg:
+		tbl := a.dataViewer.Table()
+		if tbl == nil {
+			cmds = append(cmds, a.statusBar.SetMsg("derived results — paging is only supported on tables"))
+			break
+		}
+		a.pageDir = 1
+		// "Next page" starts where the current buffer ENDS — important
+		// because the buffer may have grown beyond dbPageSize via append.
+		a.dbNextOffset = a.dbOffset + a.dataViewer.LoadedRowCount()
+		cmds = append(cmds, a.queryCmd(tbl, a.dbNextOffset, a.dbPageSize))
+
+	case tui.WantPrevPageMsg:
+		if a.dbOffset == 0 {
+			cmds = append(cmds, a.statusBar.SetMsg("already at the first page"))
+			break
+		}
+		tbl := a.dataViewer.Table()
+		if tbl == nil {
+			break
+		}
+		a.pageDir = -1
+		a.dbNextOffset = a.dbOffset - a.dbPageSize
+		if a.dbNextOffset < 0 {
+			a.dbNextOffset = 0
+		}
+		cmds = append(cmds, a.queryCmd(tbl, a.dbNextOffset, a.dbPageSize))
+
+	case tui.WantNextPageAppendMsg:
+		tbl := a.dataViewer.Table()
+		if tbl == nil {
+			cmds = append(cmds, a.statusBar.SetMsg("derived results — paging is only supported on tables"))
+			break
+		}
+		a.pageDir = 2
+		appendOffset := a.dbOffset + a.dataViewer.LoadedRowCount()
+		cmds = append(cmds, a.queryCmd(tbl, appendOffset, a.dbPageSize))
 
 	case DBQueryDoneMsg:
 		if _, live := a.inflight[msg.ReqID]; !live {
@@ -294,9 +369,40 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(a.inflight, msg.ReqID)
 		if msg.Err != nil {
 			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[db] query: %v", msg.Err)))
-		} else {
+			a.pageDir = 0
+			break
+		}
+		isEmpty := msg.ResultSet == nil || len(msg.ResultSet.Rows) == 0
+		// Forward fetches (page-replace or append) on an empty result mean
+		// we ran past the end of the table — leave the buffer intact and
+		// tell the user.
+		if (a.pageDir == 1 || a.pageDir == 2) && isEmpty {
+			cmds = append(cmds, a.statusBar.SetMsg("no more rows"))
+			a.pageDir = 0
+			break
+		}
+		switch a.pageDir {
+		case 1:
+			a.dbOffset = a.dbNextOffset
+			a.dataViewer.SetData(msg.ResultSet)
+			a.dataViewer.SetDBOffset(a.dbOffset)
+			a.dataViewer.MoveToTop()
+		case -1:
+			a.dbOffset = a.dbNextOffset
+			a.dataViewer.SetData(msg.ResultSet)
+			a.dataViewer.SetDBOffset(a.dbOffset)
+			a.dataViewer.MoveToBottom()
+		case 2:
+			// Append: extend the buffer and put the cursor on the first
+			// newly-loaded row so the user keeps moving forward naturally.
+			prevLen := a.dataViewer.LoadedRowCount()
+			a.dataViewer.AppendRows(msg.ResultSet)
+			a.dataViewer.SetCursorRow(prevLen)
+		default:
+			// Initial table load or raw SQL result.
 			a.dataViewer.SetData(msg.ResultSet)
 		}
+		a.pageDir = 0
 
 	case DBExecDoneMsg:
 		if _, live := a.inflight[msg.ReqID]; !live {
@@ -989,8 +1095,10 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 					}
 					cmds = append(cmds, a.statusBar.SetMsg(fmt.Sprintf("%d %s copied (TSV)", n, word)))
 				}
-			case " ": // toggle mark on current row
+			case " ": // toggle mark on current row, sets range anchor
 				a.dataViewer.ToggleMark()
+			case "shift+space", "M": // mark range from anchor to current row
+				a.dataViewer.MarkRange()
 			case "d": // delete row
 				if row, ok := a.dataViewer.SelectedRow(); ok {
 					table := a.dataViewer.Table()
@@ -1280,6 +1388,55 @@ func (a *App) queryCmd(table *db.Table, offset, limit int) tea.Cmd {
 			return DBQueryDoneMsg{ReqID: reqID, Err: err}
 		}
 		return DBQueryDoneMsg{ReqID: reqID, ResultSet: rs}
+	}
+}
+
+// countCmd issues a COUNT(*) for the given table and returns the result
+// in a TableCountMsg. Fired once per OpenTableMsg so the data viewer can
+// display "Loaded N / total T" in its status line. A failure here is
+// non-fatal — paging/data still work without the total.
+func (a *App) countCmd(table *db.Table) tea.Cmd {
+	reqID := newReqID()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.inflight[reqID] = cancel
+
+	drv := a.drv
+	tableName := table.Name
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)
+
+	return func() tea.Msg {
+		rs, err := drv.Query(ctx, query)
+		if err != nil {
+			return TableCountMsg{ReqID: reqID, Table: tableName, Err: err}
+		}
+		if rs == nil || len(rs.Rows) == 0 || len(rs.Rows[0].Cells) == 0 {
+			return TableCountMsg{ReqID: reqID, Table: tableName, Total: 0}
+		}
+		// Drivers return COUNT(*) as int64 (or compatible). Defensive
+		// type-switch handles every shape we've seen across the three
+		// engines; anything else falls back to 0.
+		total := 0
+		switch v := rs.Rows[0].Cells[0].(type) {
+		case int64:
+			total = int(v)
+		case int32:
+			total = int(v)
+		case int:
+			total = v
+		case float64:
+			total = int(v)
+		case []byte:
+			// MySQL's go-sql-driver may return COUNT(*) as []byte
+			// depending on driver version / DSN flags.
+			if n, perr := strconv.Atoi(string(v)); perr == nil {
+				total = n
+			}
+		case string:
+			if n, perr := strconv.Atoi(v); perr == nil {
+				total = n
+			}
+		}
+		return TableCountMsg{ReqID: reqID, Table: tableName, Total: total}
 	}
 }
 
