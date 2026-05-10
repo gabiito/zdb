@@ -13,7 +13,46 @@ import (
 // Config is the top-level configuration structure.
 type Config struct {
 	Connections []Connection `toml:"connections"`
-	AI          *AI          `toml:"ai"` // nil => AI disabled
+
+	// Multi-profile AI: ActiveAI selects which entry of AIs is in use.
+	// Empty list => AI disabled. Empty ActiveAI defaults to AIs[0].
+	AIs      []AIProfile `toml:"ais,omitempty"`
+	ActiveAI string      `toml:"active_ai,omitempty"`
+
+	// AI is the deprecated single-profile field, kept around purely for
+	// migration on first load. Once loaded it is converted to a single
+	// entry in AIs and zeroed before any business code sees it.
+	AI *AI `toml:"ai,omitempty"`
+}
+
+// AIProfile is one named AI provider configuration. Multiple profiles
+// can coexist; the user picks which one is active via the AI Settings
+// modal. The schema mirrors AI plus a Name for identity.
+type AIProfile struct {
+	Name           string `toml:"name"`
+	Provider       string `toml:"provider"`
+	BaseURL        string `toml:"base_url"`
+	Model          string `toml:"model"`
+	APIKeyEnv      string `toml:"api_key_env,omitempty"`
+	KeyringKey     string `toml:"keyring_key,omitempty"`
+	TimeoutSeconds int    `toml:"timeout_seconds,omitempty"`
+}
+
+// ActiveProfile returns a pointer to the active profile, or nil when no
+// AI is configured. Falls back to AIs[0] when ActiveAI is empty or the
+// referenced name no longer exists.
+func (c *Config) ActiveProfile() *AIProfile {
+	if len(c.AIs) == 0 {
+		return nil
+	}
+	if c.ActiveAI != "" {
+		for i := range c.AIs {
+			if c.AIs[i].Name == c.ActiveAI {
+				return &c.AIs[i]
+			}
+		}
+	}
+	return &c.AIs[0]
 }
 
 // Connection describes a named database connection profile. Credentials may
@@ -36,12 +75,16 @@ type Connection struct {
 	DSNEnv     string `toml:"dsn_env,omitempty"`
 }
 
-// AI holds AI provider configuration.
+// AI holds AI provider configuration. API key resolution order at runtime:
+// (1) KeyringKey — if set, the key is fetched from the OS keyring. (2)
+// APIKeyEnv — fallback env var. (3) Empty — sent without Authorization
+// (Ollama-style trust setups).
 type AI struct {
 	Provider       string `toml:"provider"`        // must be "openai-compat" in v1
 	BaseURL        string `toml:"base_url"`
 	Model          string `toml:"model"`
-	APIKeyEnv      string `toml:"api_key_env"`     // default "AI_API_KEY"
+	APIKeyEnv      string `toml:"api_key_env,omitempty"`
+	KeyringKey     string `toml:"keyring_key,omitempty"`
 	TimeoutSeconds int    `toml:"timeout_seconds"` // default 30
 }
 
@@ -102,9 +145,43 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("zdb: invalid config %s: %w", path, err)
 	}
 
+	// One-shot migration: if the user has the legacy single-profile [ai]
+	// block and no [[ais]] yet, convert the single block into a "default"
+	// profile and clear the old field so subsequent saves use the new
+	// schema only.
+	if cfg.AI != nil && len(cfg.AIs) == 0 {
+		cfg.AIs = []AIProfile{{
+			Name:           "default",
+			Provider:       cfg.AI.Provider,
+			BaseURL:        cfg.AI.BaseURL,
+			Model:          cfg.AI.Model,
+			APIKeyEnv:      cfg.AI.APIKeyEnv,
+			KeyringKey:     cfg.AI.KeyringKey,
+			TimeoutSeconds: cfg.AI.TimeoutSeconds,
+		}}
+		if cfg.ActiveAI == "" {
+			cfg.ActiveAI = "default"
+		}
+		cfg.AI = nil
+	}
+
+	// Apply defaults to each AI profile.
+	for i := range cfg.AIs {
+		p := &cfg.AIs[i]
+		if p.APIKeyEnv == "" && p.KeyringKey == "" {
+			p.APIKeyEnv = "AI_API_KEY"
+		}
+		if p.TimeoutSeconds == 0 {
+			p.TimeoutSeconds = 30
+		}
+	}
+
 	// Apply defaults
 	if cfg.AI != nil {
-		if cfg.AI.APIKeyEnv == "" {
+		// Default the env-var name only when no keyring source is in play —
+		// when KeyringKey is set, leaving APIKeyEnv empty is the explicit
+		// signal that the keyring is the source of truth.
+		if cfg.AI.APIKeyEnv == "" && cfg.AI.KeyringKey == "" {
 			cfg.AI.APIKeyEnv = "AI_API_KEY"
 		}
 		if cfg.AI.TimeoutSeconds == 0 {

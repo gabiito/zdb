@@ -31,6 +31,10 @@ const (
 	HelpContextWelcome
 	HelpContextModalPasswordPrompt
 	HelpContextSQLEditor
+	HelpContextModalAISetup
+	HelpContextModalAIDebug
+	HelpContextModalAIProfileList
+	HelpContextModalAIAnalytics
 )
 
 var (
@@ -325,6 +329,37 @@ func bindingsFor(ctx HelpContext, s HelpState) []helpItem {
 			{keys: "Tab", desc: "autocomplete"},
 			{keys: "Esc", desc: "back"},
 			{keys: "Ctrl+c", desc: "quit"},
+		}
+	case HelpContextModalAISetup:
+		return []helpItem{
+			{keys: "Tab", desc: "next field"},
+			{keys: "←/→", desc: "preset"},
+			{keys: "Enter", desc: "save"},
+			{keys: "Esc", desc: "cancel"},
+		}
+	case HelpContextModalAIDebug:
+		return []helpItem{
+			{keys: "Enter", desc: "retry with hint", primary: true},
+			{keys: "Ctrl+e", desc: "edit SQL"},
+			{keys: "Esc", desc: "cancel"},
+		}
+	case HelpContextModalAIProfileList:
+		return []helpItem{
+			{keys: "Enter", desc: "activate", primary: true},
+			{keys: "a", desc: "add"},
+			{keys: "e", desc: "edit"},
+			{keys: "d", desc: "delete"},
+			{keys: "g", desc: "analytics"},
+			{keys: "↑/↓", desc: "nav"},
+			{keys: "Esc", desc: "close"},
+		}
+	case HelpContextModalAIAnalytics:
+		return []helpItem{
+			{keys: "d", desc: "today"},
+			{keys: "w", desc: "7 days"},
+			{keys: "m", desc: "30 days"},
+			{keys: "a", desc: "all"},
+			{keys: "Esc", desc: "close"},
 		}
 	}
 	return nil

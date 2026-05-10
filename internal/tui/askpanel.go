@@ -1,8 +1,9 @@
 package tui
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // AskPanelModel is the AI Ask panel.
@@ -12,6 +13,7 @@ type AskPanelModel struct {
 	aiEnabled  bool
 	active     bool
 	hasPreview bool
+	loading    bool // true while the AI request is in flight
 	width      int
 	height     int
 }
@@ -41,6 +43,18 @@ func (m AskPanelModel) IsActive() bool { return m.active }
 func (m *AskPanelModel) SetPreview(sql string) {
 	m.preview = sql
 	m.hasPreview = true
+	m.loading = false
+}
+
+// SetLoading toggles the in-flight indicator. While loading, the panel
+// blocks input (except Esc) and shows a clear "thinking" cue.
+func (m *AskPanelModel) SetLoading(v bool) {
+	m.loading = v
+	if v {
+		m.input.Blur()
+	} else if !m.hasPreview {
+		m.input.Focus()
+	}
 }
 
 // Init implements tea.Model.
@@ -55,7 +69,14 @@ func (m AskPanelModel) Init() tea.Cmd {
 func (m AskPanelModel) Update(msg tea.Msg) (AskPanelModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
+		key := msg.String()
+		// While loading, only Esc is honored — any other input is
+		// ignored so the user can't queue keystrokes that race the
+		// in-flight AI response.
+		if m.loading && key != "esc" {
+			return m, nil
+		}
+		switch key {
 		case "esc":
 			m.active = false
 			return m, nil
@@ -78,7 +99,7 @@ func (m AskPanelModel) Update(msg tea.Msg) (AskPanelModel, tea.Cmd) {
 		}
 	}
 
-	if m.aiEnabled && !m.hasPreview {
+	if m.aiEnabled && !m.hasPreview && !m.loading {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
@@ -100,11 +121,20 @@ func (m AskPanelModel) View() string {
 	}
 
 	var content string
-	if m.hasPreview {
+	switch {
+	case m.loading:
+		content = StyleTitle.Render("AI Ask") + "\n\n" +
+			StyleDim.Render("> "+m.input.Value()) + "\n\n" +
+			lipgloss.NewStyle().
+				Foreground(CtpPeach).
+				Bold(true).
+				Render("⏳ Asking the AI…") + "\n\n" +
+			StyleHelp.Render("Esc: cancel")
+	case m.hasPreview:
 		content = StyleTitle.Render("AI Ask — SQL Preview") + "\n\n" +
-			m.preview + "\n\n" +
+			HighlightSQL(m.preview) + "\n\n" +
 			StyleHelp.Render("y/Ctrl+Enter: execute · Esc: cancel")
-	} else {
+	default:
 		content = StyleTitle.Render("AI Ask") + "\n\n" +
 			m.input.View() + "\n\n" +
 			StyleHelp.Render("Enter: submit · Esc: cancel")

@@ -30,6 +30,10 @@ const (
 	ModalAddConnection // form for adding a new DB connection from the conn picker
 	ModalEditConnection // form for editing the selected connection in the picker
 	ModalPasswordPrompt // single-field prompt asked at connect time when no secret is stored
+	ModalAISetup        // first-run wizard for the AI provider configuration
+	ModalAIDebug        // failure-recovery panel for AI-driven query errors
+	ModalAIProfileList  // browse / activate / add / edit / delete AI profiles
+	ModalAIAnalytics    // usage + cost-estimate dashboard
 )
 
 // FocusState tracks which sub-component owns keyboard input within a screen.

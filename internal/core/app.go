@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +55,11 @@ type App struct {
 	welcome      tui.WelcomeModel
 	pwPrompt     tui.PasswordPromptModel
 	sqlEditor    tui.SQLEditorModel
+	aiSetup      tui.AISetupModel
+	aiDebug      tui.AIDebugModel
+	aiProfiles   tui.AIProfileListModel
+	aiAnalytics  tui.AIAnalyticsModel
+	pendingDeleteAIProfile string // name pending delete confirm
 	statusBar    tui.StatusBarModel
 	spinner      spinner.Model
 
@@ -82,6 +88,13 @@ type App struct {
 	// required) and the prompt's submit/cancel. Empty Name means no prompt
 	// is in flight.
 	pendingConnectConn config.Connection
+
+	// AI flow tracking — used to route DB errors that originated from an
+	// AI-generated query into the debug panel (where the user can hint
+	// the AI to fix it) instead of just dropping them in the status bar.
+	lastAIQuestion string
+	lastAIQuerySQL string
+	aiQueryActive  bool
 
 	// Database-level pagination state for the active table view.
 	// dbOffset is the offset of the FIRST row of the current buffer;
@@ -128,14 +141,7 @@ func NewApp(cfg config.Config, log *slog.Logger) *App {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 
-	aiCfg := ai.Config{}
-	if cfg.AI != nil {
-		aiCfg.BaseURL = cfg.AI.BaseURL
-		aiCfg.Model = cfg.AI.Model
-		aiCfg.TimeoutSeconds = cfg.AI.TimeoutSeconds
-	}
-
-	provider := ai.New(aiCfg)
+	provider := ai.New(resolveAIConfig(cfg.ActiveProfile()))
 
 	store, err := views.NewStore()
 	if err != nil {
@@ -274,6 +280,69 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.pendingConnectConn = config.Connection{}
 		a.modal = ModalNone
 
+	case tui.AISetupSubmitMsg:
+		// Find or create the profile.
+		idx := -1
+		for i := range a.cfg.AIs {
+			if a.cfg.AIs[i].Name == msg.Name {
+				idx = i
+				break
+			}
+		}
+		// Per-profile keyring key keeps multiple profiles' secrets isolated.
+		keyringKey := ""
+		if idx >= 0 {
+			keyringKey = a.cfg.AIs[idx].KeyringKey
+		}
+		if msg.APIKey != "" {
+			if keyringKey == "" {
+				keyringKey = keyringKeyForProfile(msg.Name)
+			}
+			if err := secrets.SetPassword(keyringKey, msg.APIKey); err != nil {
+				a.aiSetup.SetError(fmt.Sprintf("OS keyring unavailable: %v", err))
+				break
+			}
+		}
+		profile := config.AIProfile{
+			Name:           msg.Name,
+			Provider:       "openai-compat",
+			BaseURL:        msg.BaseURL,
+			Model:          msg.Model,
+			TimeoutSeconds: msg.TimeoutSeconds,
+			KeyringKey:     keyringKey,
+		}
+		if idx >= 0 {
+			a.cfg.AIs[idx] = profile
+		} else {
+			a.cfg.AIs = append(a.cfg.AIs, profile)
+		}
+		// New profiles activate automatically; edits keep the current
+		// active selection unless this WAS the active one (no-op).
+		if !msg.IsEdit || a.cfg.ActiveAI == "" {
+			a.cfg.ActiveAI = msg.Name
+		}
+		if a.configPath == "" {
+			a.aiSetup.SetError("no config path resolved — cannot persist AI settings")
+			break
+		}
+		if err := config.Save(a.cfg, a.configPath); err != nil {
+			a.aiSetup.SetError(fmt.Sprintf("save config: %v", err))
+			break
+		}
+		// Re-initialize the provider so subsequent Asks use the new config.
+		a.ai = ai.New(resolveAIConfig(a.cfg.ActiveProfile()))
+		a.modal = ModalNone
+		if msg.IsEdit {
+			cmds = append(cmds, a.statusBar.SetMsg("profile updated: "+msg.Name))
+		} else {
+			cmds = append(cmds, a.statusBar.SetMsg("AI configured — opening Ask Panel"))
+			a.screen = ScreenAskPanel
+			a.askPanel = tui.NewAskPanelModel(true, a.width, a.height)
+		}
+
+	case tui.AISetupCancelMsg:
+		a.modal = ModalNone
+
 	case ConnectedMsg:
 		if _, live := a.inflight[msg.ReqID]; !live {
 			break // cancelled
@@ -404,10 +473,29 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		delete(a.inflight, msg.ReqID)
 		if msg.Err != nil {
+			// AI-driven query failed — surface it in the debug panel so
+			// the user can hint the AI for a fix instead of just losing
+			// the failure context to the status bar.
+			if a.aiQueryActive {
+				a.aiQueryActive = false
+				a.aiDebug = tui.NewAIDebugModel(
+					a.lastAIQuestion,
+					a.lastAIQuerySQL,
+					msg.Err.Error(),
+					a.width,
+					a.height,
+				)
+				a.modal = ModalAIDebug
+				a.pageDir = 0
+				break
+			}
 			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[db] query: %v", msg.Err)))
 			a.pageDir = 0
 			break
 		}
+		// Successful query — clear AI tracking so the next failure (if
+		// it comes from a non-AI path) doesn't trigger the debug panel.
+		a.aiQueryActive = false
 		isEmpty := msg.ResultSet == nil || len(msg.ResultSet.Rows) == 0
 		// Forward fetches (page-replace or append) on an empty result mean
 		// we ran past the end of the table — leave the buffer intact and
@@ -465,6 +553,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.modal = ModalNone
 			break
 		}
+		if a.pendingDeleteAIProfile != "" {
+			cmds = append(cmds, a.deleteAIProfile(a.pendingDeleteAIProfile))
+			a.pendingDeleteAIProfile = ""
+			a.openAIProfileList() // re-open the list with the entry gone
+			break
+		}
 		if a.pendingTx != nil {
 			cmds = append(cmds, a.commitCmd(a.pendingTx))
 			a.pendingTx = nil
@@ -475,6 +569,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.pendingDeleteConn != "" {
 			a.pendingDeleteConn = ""
 			a.modal = ModalNone
+			break
+		}
+		if a.pendingDeleteAIProfile != "" {
+			a.pendingDeleteAIProfile = ""
+			a.openAIProfileList()
 			break
 		}
 		if a.pendingTx != nil {
@@ -879,6 +978,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tui.AskSubmitMsg:
+		a.lastAIQuestion = msg.Question
+		a.askPanel.SetLoading(true)
 		cmds = append(cmds, a.askAICmd(msg.Question))
 
 	case AISuggestDoneMsg:
@@ -899,14 +1000,100 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		delete(a.inflight, msg.ReqID)
+		a.askPanel.SetLoading(false)
 		if msg.Err != nil {
-			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[ai] ask: %v", msg.Err)))
+			// Surface AI failures in the debug panel when one is open
+			// (a retry came back empty/failed) so the user keeps the
+			// failure context. Otherwise just status-bar it.
+			if a.modal == ModalAIDebug {
+				a.aiDebug.SetPending(false)
+				cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[ai] ask: %v", msg.Err)))
+			} else {
+				cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[ai] ask: %v", msg.Err)))
+			}
+			break
+		}
+		// Successful AI response. If we're recovering from a failure, the
+		// debug panel was open; close it before running the new SQL.
+		if a.modal == ModalAIDebug {
+			a.modal = ModalNone
+		}
+		// Auto-execute read-only queries and route the result through the
+		// data viewer; preview-and-confirm any mutating SQL via the ask
+		// panel so the AI never writes without explicit user OK.
+		if isReadOnlySQL(msg.SQL) {
+			a.lastAIQuerySQL = msg.SQL
+			a.aiQueryActive = true
+			a.lastSQL = msg.SQL
+			a.screen = ScreenDataViewer
+			cmds = append(cmds, a.execSQLCmd(msg.SQL))
 		} else {
 			a.askPanel.SetPreview(msg.SQL)
-			if msg.Truncated {
-				cmds = append(cmds, a.statusBar.SetMsg("AI: schema truncated to 30 tables"))
+		}
+		if msg.Truncated {
+			cmds = append(cmds, a.statusBar.SetMsg("AI: schema truncated to 30 tables"))
+		}
+
+	case tui.AIDebugRetryMsg:
+		// Build a retry prompt that gives the AI the failure context
+		// alongside the user's hint, then re-issue the Ask. The debug
+		// panel stays visible (in pending state) until the response.
+		retry := buildAIDebugPrompt(msg.Question, msg.PreviousSQL, msg.Error, msg.Hint)
+		a.aiDebug.SetPending(true)
+		cmds = append(cmds, a.askAICmd(retry))
+
+	case tui.AIDebugCancelMsg:
+		a.modal = ModalNone
+		a.aiQueryActive = false
+
+	case tui.AIDebugEditMsg:
+		a.modal = ModalNone
+		a.aiQueryActive = false
+		a.openSQLEditor()
+		a.sqlEditor.SetValue(msg.SQL)
+
+	case tui.AIProfileActivateMsg:
+		a.cfg.ActiveAI = msg.Name
+		if a.configPath != "" {
+			if err := config.Save(a.cfg, a.configPath); err != nil {
+				cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err)))
 			}
 		}
+		a.ai = ai.New(resolveAIConfig(a.cfg.ActiveProfile()))
+		cmds = append(cmds, a.statusBar.SetMsg("AI profile: "+msg.Name))
+		a.aiProfiles = tui.NewAIProfileListModel(a.cfg.AIs, a.cfg.ActiveAI, a.width, a.height)
+
+	case tui.AIProfileAddMsg:
+		a.aiSetup = tui.NewAISetupModel(a.width, a.height)
+		a.modal = ModalAISetup
+
+	case tui.AIProfileEditMsg:
+		for _, p := range a.cfg.AIs {
+			if p.Name == msg.Name {
+				a.aiSetup = tui.NewAISetupModelEdit(p.Name, p.BaseURL, p.Model, a.width, a.height)
+				a.modal = ModalAISetup
+				break
+			}
+		}
+
+	case tui.AIProfileDeleteMsg:
+		a.pendingDeleteAIProfile = msg.Name
+		a.confirm = tui.NewConfirmModel(
+			fmt.Sprintf("Delete AI profile %q?", msg.Name),
+			true,
+		)
+		a.modal = ModalConfirm
+
+	case tui.AIProfileListCloseMsg:
+		a.modal = ModalNone
+
+	case tui.AIProfileOpenAnalyticsMsg:
+		records, err := ai.LoadUsage()
+		a.aiAnalytics = tui.NewAIAnalyticsModel(records, err, a.width, a.height)
+		a.modal = ModalAIAnalytics
+
+	case tui.AIAnalyticsCloseMsg:
+		a.modal = ModalNone
 
 	default:
 		// Route to active screen / modal
@@ -964,6 +1151,22 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 		case ModalPasswordPrompt:
 			var cmd tea.Cmd
 			a.pwPrompt, cmd = a.pwPrompt.Update(msg)
+			cmds = append(cmds, cmd)
+		case ModalAISetup:
+			var cmd tea.Cmd
+			a.aiSetup, cmd = a.aiSetup.Update(msg)
+			cmds = append(cmds, cmd)
+		case ModalAIDebug:
+			var cmd tea.Cmd
+			a.aiDebug, cmd = a.aiDebug.Update(msg)
+			cmds = append(cmds, cmd)
+		case ModalAIProfileList:
+			var cmd tea.Cmd
+			a.aiProfiles, cmd = a.aiProfiles.Update(msg)
+			cmds = append(cmds, cmd)
+		case ModalAIAnalytics:
+			var cmd tea.Cmd
+			a.aiAnalytics, cmd = a.aiAnalytics.Update(msg)
 			cmds = append(cmds, cmd)
 		case ModalStagedView:
 			handled := false
@@ -1084,6 +1287,10 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 				cmds = append(cmds, a.sqlBar.Focus())
 			case "ctrl+e":
 				a.openSQLEditor()
+			case "ctrl+a", "f2":
+				a.openAI()
+			case "ctrl+p":
+				a.openAIProfileList()
 			case "V":
 				a.viewsList = tui.NewViewsListModel(a.loadViewItems(), a.width, a.height)
 				a.modal = ModalViewsList
@@ -1136,9 +1343,8 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 				cmds = append(cmds, a.sqlBar.Focus())
 			case "ctrl+e": // open the full-screen SQL editor
 				a.openSQLEditor()
-			case "ctrl+a", "f2": // open AI ask panel
-				a.screen = ScreenAskPanel
-				a.askPanel = tui.NewAskPanelModel(a.ai.Enabled(), a.width, a.height)
+			case "ctrl+a", "f2": // open AI ask panel (or setup wizard when unconfigured)
+				a.openAI()
 			case "v": // view cell
 				if row, col, ok := a.dataViewer.SelectedCell(); ok {
 					a.dataViewer.OpenCellView(row, col)
@@ -1367,6 +1573,14 @@ func (a *App) View() string {
 			overlay = a.editConn.View()
 		case ModalPasswordPrompt:
 			overlay = a.pwPrompt.View()
+		case ModalAISetup:
+			overlay = a.aiSetup.View()
+		case ModalAIDebug:
+			overlay = a.aiDebug.View()
+		case ModalAIProfileList:
+			overlay = a.aiProfiles.View()
+		case ModalAIAnalytics:
+			overlay = a.aiAnalytics.View()
 		}
 		body = lipgloss.Place(a.width, bodyHeight, lipgloss.Center, lipgloss.Center, overlay)
 	}
@@ -1468,6 +1682,14 @@ func (a *App) helpContext() tui.HelpContext {
 		return tui.HelpContextModalEditConnection
 	case ModalPasswordPrompt:
 		return tui.HelpContextModalPasswordPrompt
+	case ModalAISetup:
+		return tui.HelpContextModalAISetup
+	case ModalAIDebug:
+		return tui.HelpContextModalAIDebug
+	case ModalAIProfileList:
+		return tui.HelpContextModalAIProfileList
+	case ModalAIAnalytics:
+		return tui.HelpContextModalAIAnalytics
 	}
 	if a.sqlBar.IsFocused() {
 		return tui.HelpContextSqlBarFocused
@@ -1940,6 +2162,167 @@ func (a *App) renderTabBar() string {
 		bar = lipgloss.NewStyle().MaxWidth(a.width).Render(bar)
 	}
 	return bar
+}
+
+// activeAIName returns the active profile's name, or "" when no AI is set.
+func (a *App) activeAIName() string {
+	if p := a.cfg.ActiveProfile(); p != nil {
+		return p.Name
+	}
+	return ""
+}
+
+// openAIProfileList opens the AI Profile list modal so the user can
+// switch between configured providers, add new ones, edit, or delete.
+func (a *App) openAIProfileList() {
+	a.aiProfiles = tui.NewAIProfileListModel(a.cfg.AIs, a.cfg.ActiveAI, a.width, a.height)
+	a.modal = ModalAIProfileList
+}
+
+// openAI is the single entry point for invoking the AI feature, called
+// from any screen that exposes Ctrl+A. When AI is already configured it
+// jumps straight to the Ask Panel; when it isn't, it surfaces the setup
+// wizard so the user never sees a dead-end "AI disabled" hint.
+func (a *App) openAI() {
+	if a.ai.Enabled() {
+		a.screen = ScreenAskPanel
+		a.askPanel = tui.NewAskPanelModel(true, a.width, a.height)
+		return
+	}
+	a.aiSetup = tui.NewAISetupModel(a.width, a.height)
+	a.modal = ModalAISetup
+}
+
+// buildAIDebugPrompt augments the original natural-language question
+// with the prior failed SQL, its DB error, and the user's hint so the
+// AI sees the full failure context. The prompt builder downstream
+// already prepends the schema; this just substitutes the user payload.
+func buildAIDebugPrompt(question, prevSQL, errMsg, hint string) string {
+	var sb strings.Builder
+	sb.WriteString(strings.TrimSpace(question))
+	sb.WriteString("\n\nThe previous attempt failed with this error:\n")
+	sb.WriteString(strings.TrimSpace(errMsg))
+	sb.WriteString("\n\nThe SQL that failed was:\n")
+	sb.WriteString(strings.TrimSpace(prevSQL))
+	if h := strings.TrimSpace(hint); h != "" {
+		sb.WriteString("\n\nUser hint: ")
+		sb.WriteString(h)
+	}
+	sb.WriteString("\n\nPlease return a corrected SQL.")
+	return sb.String()
+}
+
+// isReadOnlySQL reports whether sql is safe to auto-execute without user
+// confirmation. The check is intentionally conservative: only statements
+// that begin with SELECT / WITH / EXPLAIN / SHOW / PRAGMA / DESC[RIBE]
+// (after stripping leading comments and whitespace) qualify. Anything
+// else — even if benign in the user's mind — falls back to the manual
+// preview-and-confirm flow so the AI cannot mutate data on its own.
+func isReadOnlySQL(sql string) bool {
+	s := strings.TrimSpace(sql)
+	// Strip any leading line comments (-- ...) and block comments (/* ... */).
+	for {
+		switch {
+		case strings.HasPrefix(s, "--"):
+			if i := strings.IndexByte(s, '\n'); i >= 0 {
+				s = strings.TrimSpace(s[i+1:])
+			} else {
+				return false
+			}
+		case strings.HasPrefix(s, "/*"):
+			if i := strings.Index(s, "*/"); i >= 0 {
+				s = strings.TrimSpace(s[i+2:])
+			} else {
+				return false
+			}
+		default:
+			goto done
+		}
+	}
+done:
+	up := strings.ToUpper(s)
+	for _, prefix := range []string{"SELECT ", "SELECT\n", "SELECT\t", "WITH ", "EXPLAIN ", "SHOW ", "PRAGMA ", "DESCRIBE ", "DESC "} {
+		if strings.HasPrefix(up, prefix) {
+			return true
+		}
+	}
+	// SELECT alone (no trailing space) — accept too.
+	if up == "SELECT" || up == "EXPLAIN" || up == "SHOW" {
+		return true
+	}
+	return false
+}
+
+// deleteAIProfile removes a profile by name from the config, drops the
+// keyring secret (best-effort), persists the result, and re-resolves
+// the active provider so it points at the next remaining profile (or
+// becomes NoOp when the list is empty).
+func (a *App) deleteAIProfile(name string) tea.Cmd {
+	idx := -1
+	var keyringKey string
+	for i, p := range a.cfg.AIs {
+		if p.Name == name {
+			idx = i
+			keyringKey = p.KeyringKey
+			break
+		}
+	}
+	if idx < 0 {
+		return a.statusBar.SetErr(fmt.Errorf("[config] AI profile %q not found", name))
+	}
+	a.cfg.AIs = append(a.cfg.AIs[:idx], a.cfg.AIs[idx+1:]...)
+	if a.cfg.ActiveAI == name {
+		if len(a.cfg.AIs) > 0 {
+			a.cfg.ActiveAI = a.cfg.AIs[0].Name
+		} else {
+			a.cfg.ActiveAI = ""
+		}
+	}
+	if keyringKey != "" {
+		if err := secrets.DeletePassword(keyringKey); err != nil {
+			a.log.Warn("ai keyring delete failed", "key", keyringKey, "err", err)
+		}
+	}
+	if a.configPath != "" {
+		if err := config.Save(a.cfg, a.configPath); err != nil {
+			return a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err))
+		}
+	}
+	a.ai = ai.New(resolveAIConfig(a.cfg.ActiveProfile()))
+	return a.statusBar.SetMsg("AI profile deleted: " + name)
+}
+
+// keyringKeyForProfile returns the OS-keyring entry path used to store
+// an AI profile's API key. Per-profile namespacing keeps multiple
+// profiles' secrets isolated and lets us delete one without affecting
+// the others.
+func keyringKeyForProfile(name string) string {
+	return "zdb/ai-key/" + name
+}
+
+// resolveAIConfig translates an AI profile into the runtime ai.Config
+// the provider needs, resolving the API key from the OS keyring or env
+// var (in that order). Returns a zero ai.Config when p is nil — ai.New
+// treats that as "disabled" and returns NoOp.
+func resolveAIConfig(p *config.AIProfile) ai.Config {
+	if p == nil {
+		return ai.Config{}
+	}
+	cfg := ai.Config{
+		ProfileName:    p.Name,
+		BaseURL:        p.BaseURL,
+		Model:          p.Model,
+		TimeoutSeconds: p.TimeoutSeconds,
+	}
+	if p.KeyringKey != "" {
+		if pw, err := secrets.GetPassword(p.KeyringKey); err == nil {
+			cfg.APIKey = pw
+		}
+	}
+	if cfg.APIKey == "" && p.APIKeyEnv != "" {
+		cfg.APIKey = os.Getenv(p.APIKeyEnv)
+	}
+	return cfg
 }
 
 // openSQLEditor switches into the full-screen SQL editor, pre-filling it

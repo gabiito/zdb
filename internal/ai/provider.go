@@ -19,9 +19,10 @@ type Suggestion struct {
 
 // Config holds the AI provider configuration resolved from the app config.
 type Config struct {
+	ProfileName    string // for usage logging; empty when N/A
 	BaseURL        string
 	Model          string
-	APIKey         string // resolved from env var
+	APIKey         string // resolved from env var or keyring
 	TimeoutSeconds int    // 0 → default 30
 }
 
