@@ -4,11 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gabiito/db-viewer/internal/config"
+	"github.com/gabiito/zdb/internal/config"
 )
 
 func TestLoadFullConfig(t *testing.T) {
-	t.Setenv("DBVIEWER_CONFIG", "testdata/full.toml")
+	t.Setenv("ZDB_CONFIG", "testdata/full.toml")
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("Load(full.toml): %v", err)
@@ -28,7 +28,7 @@ func TestLoadFullConfig(t *testing.T) {
 }
 
 func TestLoadAIDisabledConfig(t *testing.T) {
-	t.Setenv("DBVIEWER_CONFIG", "testdata/ai_disabled.toml")
+	t.Setenv("ZDB_CONFIG", "testdata/ai_disabled.toml")
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("Load(ai_disabled.toml): %v", err)
@@ -42,7 +42,7 @@ func TestLoadAIDisabledConfig(t *testing.T) {
 }
 
 func TestLoadMissingConfig(t *testing.T) {
-	t.Setenv("DBVIEWER_CONFIG", "testdata/does_not_exist.toml")
+	t.Setenv("ZDB_CONFIG", "testdata/does_not_exist.toml")
 	_, err := config.Load()
 	if err == nil {
 		t.Fatal("expected error for missing config, got nil")
@@ -52,7 +52,7 @@ func TestLoadMissingConfig(t *testing.T) {
 }
 
 func TestLoadInvalidTOML(t *testing.T) {
-	t.Setenv("DBVIEWER_CONFIG", "testdata/invalid.toml")
+	t.Setenv("ZDB_CONFIG", "testdata/invalid.toml")
 	_, err := config.Load()
 	if err == nil {
 		t.Fatal("expected error for invalid TOML, got nil")
@@ -73,7 +73,7 @@ func TestLoadDSNNotLeakedInError(t *testing.T) {
 	// We rely on the fact that missing file errors don't echo back DSN values.
 	// The main DSN-redaction contract is on the logger, not config errors.
 	// But validate that the error from an invalid engine doesn't include the raw DSN.
-	t.Setenv("DBVIEWER_CONFIG", "testdata/full.toml")
+	t.Setenv("ZDB_CONFIG", "testdata/full.toml")
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -88,7 +88,7 @@ func TestLoadDSNNotLeakedInError(t *testing.T) {
 }
 
 func TestDefaultAPIKeyEnv(t *testing.T) {
-	t.Setenv("DBVIEWER_CONFIG", "testdata/full.toml")
+	t.Setenv("ZDB_CONFIG", "testdata/full.toml")
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)

@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 // JoinExecMsg is emitted when the wizard finishes successfully — the App

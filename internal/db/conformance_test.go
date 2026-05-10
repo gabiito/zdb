@@ -6,8 +6,8 @@ package db_test
 import (
 	"testing"
 
-	"github.com/gabiito/db-viewer/internal/db"
-	_ "github.com/gabiito/db-viewer/internal/db/sqlite"
+	"github.com/gabiito/zdb/internal/db"
+	_ "github.com/gabiito/zdb/internal/db/sqlite"
 )
 
 func TestNewUnknownEngine(t *testing.T) {

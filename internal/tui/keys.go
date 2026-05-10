@@ -2,7 +2,7 @@ package tui
 
 import "github.com/charmbracelet/bubbles/key"
 
-// KeyMap defines all keyboard bindings for db-viewer.
+// KeyMap defines all keyboard bindings for zDB.
 type KeyMap struct {
 	// Navigation
 	Up       key.Binding

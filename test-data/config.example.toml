@@ -1,0 +1,26 @@
+# Example zdb config wired to the three test-data databases.
+# Copy to ~/.config/zdb/config.toml or run with:
+#   ZDB_CONFIG=$(pwd)/test-data/config.example.toml go run ./cmd/zdb
+
+[[connections]]
+name   = "school-sqlite"
+engine = "sqlite"
+dsn    = "/tmp/dev.db"
+
+[[connections]]
+name   = "school-postgres"
+engine = "postgres"
+dsn    = "postgres://dev:dev@localhost:5432/school?sslmode=disable"
+
+[[connections]]
+name   = "school-mysql"
+engine = "mysql"
+dsn    = "dev:dev@tcp(127.0.0.1:3306)/school?parseTime=true"
+
+# AI is optional — uncomment and set up if you want to test the Ask panel.
+# [ai]
+# provider        = "openai-compat"
+# base_url        = "https://api.openai.com/v1"
+# model           = "gpt-4o-mini"
+# api_key_env     = "OPENAI_API_KEY"
+# timeout_seconds = 30

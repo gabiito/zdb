@@ -3,7 +3,7 @@ package logging_test
 import (
 	"testing"
 
-	"github.com/gabiito/db-viewer/internal/logging"
+	"github.com/gabiito/zdb/internal/logging"
 )
 
 func TestRedactDSNURLStyle(t *testing.T) {

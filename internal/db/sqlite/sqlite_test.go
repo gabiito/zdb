@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/gabiito/db-viewer/internal/db"
-	"github.com/gabiito/db-viewer/internal/db/conformance"
-	_ "github.com/gabiito/db-viewer/internal/db/sqlite" // register the sqlite driver
+	"github.com/gabiito/zdb/internal/db"
+	"github.com/gabiito/zdb/internal/db/conformance"
+	_ "github.com/gabiito/zdb/internal/db/sqlite" // register the sqlite driver
 )
 
 func TestSQLiteConformance(t *testing.T) {

@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 // StagedChangeMsg is emitted by CellEditModel when the user saves a cell edit.

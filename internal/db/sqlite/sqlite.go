@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	internaldb "github.com/gabiito/db-viewer/internal/db"
+	internaldb "github.com/gabiito/zdb/internal/db"
 	_ "modernc.org/sqlite" // register the sqlite driver
 )
 

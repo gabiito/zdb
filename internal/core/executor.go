@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 // Executor handles the transaction lifecycle for cell edits and row deletes.

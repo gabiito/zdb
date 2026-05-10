@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gabiito/db-viewer/internal/ai"
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/ai"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 // makeCompatResponse builds a valid chat/completions JSON response.

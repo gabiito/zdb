@@ -1,10 +1,10 @@
 // Package core contains the Bubbletea root model (App), edit buffer, executor,
-// schema cache, and all message/command types for db-viewer.
+// schema cache, and all message/command types for zDB.
 package core
 
 import (
-	"github.com/gabiito/db-viewer/internal/ai"
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/ai"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 // DBQueryDoneMsg carries the result of an async DB Query call.

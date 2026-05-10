@@ -5,7 +5,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/gabiito/db-viewer/internal/config"
+	"github.com/gabiito/zdb/internal/config"
 )
 
 // ConnectMsg is emitted when the user selects a connection.
@@ -45,10 +45,20 @@ func NewConnPickerModel(connections []config.Connection, width, height int) Conn
 		BorderForeground(lipgloss.Color("205"))
 
 	l := list.New(items, delegate, width, height-4)
-	l.Title = "db-viewer — select connection"
+	l.Title = "zDB — select connection"
 	l.Styles.Title = StyleTitle
 
 	return ConnPickerModel{list: l, width: width, height: height}
+}
+
+// Selected returns the currently highlighted connection, if any. The second
+// return value is false when the list is empty.
+func (m ConnPickerModel) Selected() (config.Connection, bool) {
+	item, ok := m.list.SelectedItem().(connItem)
+	if !ok {
+		return config.Connection{}, false
+	}
+	return item.conn, true
 }
 
 // Init implements tea.Model.

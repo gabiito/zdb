@@ -1,4 +1,4 @@
-// Package config loads and validates the db-viewer TOML configuration.
+// Package config loads and validates the zDB TOML configuration.
 package config
 
 import (
@@ -72,8 +72,20 @@ func Save(cfg Config, path string) error {
 	return toml.NewEncoder(f).Encode(cfg)
 }
 
+// LoadOrEmpty loads the configuration if a file is found at any of the lookup
+// paths. When no file exists, returns an empty Config and no error — used by
+// the TUI's first-run flow to drop into the welcome screen instead of erroring.
+// Other failures (parse errors, validation errors) are still returned.
+func LoadOrEmpty() (Config, error) {
+	if _, err := resolvePath(); err != nil {
+		// No file found at any lookup path — treat as empty config.
+		return Config{}, nil
+	}
+	return Load()
+}
+
 // Load reads and validates the configuration file.
-// Lookup order: $DBVIEWER_CONFIG → $XDG_CONFIG_HOME/dbviewer/config.toml → $HOME/.config/dbviewer/config.toml.
+// Lookup order: $ZDB_CONFIG → $XDG_CONFIG_HOME/zdb/config.toml → $HOME/.config/zdb/config.toml.
 func Load() (Config, error) {
 	path, err := resolvePath()
 	if err != nil {
@@ -83,11 +95,11 @@ func Load() (Config, error) {
 	var cfg Config
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		// Sanitize: don't include raw TOML content or DSN in the error
-		return Config{}, fmt.Errorf("dbviewer: parse config %s: %w", path, errors.New(sanitizeTOMLError(err)))
+		return Config{}, fmt.Errorf("zdb: parse config %s: %w", path, errors.New(sanitizeTOMLError(err)))
 	}
 
 	if err := validate(&cfg); err != nil {
-		return Config{}, fmt.Errorf("dbviewer: invalid config %s: %w", path, err)
+		return Config{}, fmt.Errorf("zdb: invalid config %s: %w", path, err)
 	}
 
 	// Apply defaults
@@ -107,25 +119,25 @@ func Load() (Config, error) {
 // when no config file exists yet. Used by Save when the user is creating
 // a connection from inside the TUI.
 func resolvePathOrDefault() (string, error) {
-	if p := os.Getenv("DBVIEWER_CONFIG"); p != "" {
+	if p := os.Getenv("ZDB_CONFIG"); p != "" {
 		return p, nil
 	}
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "dbviewer", "config.toml"), nil
+		return filepath.Join(x, "zdb", "config.toml"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("dbviewer: cannot resolve home directory: %w", err)
+		return "", fmt.Errorf("zdb: cannot resolve home directory: %w", err)
 	}
-	return filepath.Join(home, ".config", "dbviewer", "config.toml"), nil
+	return filepath.Join(home, ".config", "zdb", "config.toml"), nil
 }
 
 // resolvePath returns the config file path using the lookup order defined in the design.
 func resolvePath() (string, error) {
 	// 1. Explicit override
-	if p := os.Getenv("DBVIEWER_CONFIG"); p != "" {
+	if p := os.Getenv("ZDB_CONFIG"); p != "" {
 		if _, err := os.Stat(p); err != nil {
-			return "", fmt.Errorf("dbviewer: config file %s not found", p)
+			return "", fmt.Errorf("zdb: config file %s not found", p)
 		}
 		return p, nil
 	}
@@ -133,7 +145,7 @@ func resolvePath() (string, error) {
 	// 2. XDG
 	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
 	if xdgConfig != "" {
-		p := filepath.Join(xdgConfig, "dbviewer", "config.toml")
+		p := filepath.Join(xdgConfig, "zdb", "config.toml")
 		if _, err := os.Stat(p); err == nil {
 			return p, nil
 		}
@@ -142,26 +154,25 @@ func resolvePath() (string, error) {
 	// 3. Default home
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("dbviewer: cannot resolve home directory: %w", err)
+		return "", fmt.Errorf("zdb: cannot resolve home directory: %w", err)
 	}
-	p := filepath.Join(home, ".config", "dbviewer", "config.toml")
+	p := filepath.Join(home, ".config", "zdb", "config.toml")
 	if _, err := os.Stat(p); err == nil {
 		return p, nil
 	}
 
 	// Not found — return helpful error without any DSN/key in the message
 	return "", fmt.Errorf(
-		"dbviewer: no config found. Create %s. Example: see examples/config.toml",
-		filepath.Join(home, ".config", "dbviewer", "config.toml"),
+		"zdb: no config found. Create %s. Example: see examples/config.toml",
+		filepath.Join(home, ".config", "zdb", "config.toml"),
 	)
 }
 
 // validate checks the semantic validity of the loaded config.
+//
+// An empty connections list is allowed — the TUI shows a welcome/first-run
+// screen and lets the user add connections from inside the app.
 func validate(cfg *Config) error {
-	if len(cfg.Connections) == 0 {
-		return errors.New("at least one [[connections]] entry is required")
-	}
-
 	seen := map[string]bool{}
 	for i, c := range cfg.Connections {
 		if c.Name == "" {

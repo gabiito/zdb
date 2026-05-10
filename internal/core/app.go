@@ -7,19 +7,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/gabiito/db-viewer/internal/ai"
-	"github.com/gabiito/db-viewer/internal/config"
-	"github.com/gabiito/db-viewer/internal/db"
-	"github.com/gabiito/db-viewer/internal/secrets"
-	"github.com/gabiito/db-viewer/internal/tui"
-	"github.com/gabiito/db-viewer/internal/views"
+	"github.com/gabiito/zdb/internal/ai"
+	"github.com/gabiito/zdb/internal/config"
+	"github.com/gabiito/zdb/internal/db"
+	"github.com/gabiito/zdb/internal/secrets"
+	"github.com/gabiito/zdb/internal/tui"
+	"github.com/gabiito/zdb/internal/views"
 )
 
-// App is the Bubbletea root model for db-viewer.
+// App is the Bubbletea root model for zDB.
 type App struct {
 	cfg  config.Config
 	log  *slog.Logger
@@ -48,6 +49,9 @@ type App struct {
 	viewsList    tui.ViewsListModel
 	saveView     tui.SaveViewModel
 	addConn      tui.AddConnectionModel
+	editConn     tui.EditConnectionModel
+	welcome      tui.WelcomeModel
+	pwPrompt     tui.PasswordPromptModel
 	statusBar    tui.StatusBarModel
 	spinner      spinner.Model
 
@@ -60,6 +64,22 @@ type App struct {
 	// for the duration of the test.
 	pendingPassword    string
 	pendingTemplateDSN string
+
+	// Edit-flow state captured between EditConnectionSubmit and the test
+	// callback. pendingEditOriginal.Name == "" means no edit is in flight.
+	pendingEditOriginal        config.Connection
+	pendingEditPassword        string
+	pendingEditPasswordChanged bool
+
+	// Connection name pending delete-confirmation. Empty when no delete is
+	// in flight. When non-empty, ConfirmYes/No routes to the delete handler
+	// instead of the transaction commit/rollback path.
+	pendingDeleteConn string
+
+	// Connection captured between ConnectMsg (when a password prompt is
+	// required) and the prompt's submit/cancel. Empty Name means no prompt
+	// is in flight.
+	pendingConnectConn config.Connection
 
 	// joinChain mirrors the JOIN sequence currently materialized in the data
 	// viewer (alias + table per step). Empty when no wizard-built JOIN is
@@ -112,13 +132,18 @@ func NewApp(cfg config.Config, log *slog.Logger) *App {
 		}
 	}
 
+	startScreen := ScreenConnPicker
+	if len(cfg.Connections) == 0 {
+		startScreen = ScreenWelcome
+	}
+
 	return &App{
 		cfg:        cfg,
 		log:        log,
 		ai:         provider,
 		edit:       &EditBuffer{},
 		exec:       &Executor{},
-		screen:     ScreenConnPicker,
+		screen:     startScreen,
 		inflight:   make(map[string]context.CancelFunc),
 		spinner:    s,
 		sqlBar:     tui.NewSqlBarModel(80),
@@ -145,9 +170,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.height = wsMsg.Height
 		a.statusBar.SetWidth(wsMsg.Width)
 
-		// Re-initialize conn picker if needed
-		if a.screen == ScreenConnPicker {
+		// Re-initialize the active screen's sub-model when its layout depends
+		// on the terminal size.
+		switch a.screen {
+		case ScreenConnPicker:
 			a.connPicker = tui.NewConnPickerModel(a.cfg.Connections, a.width, a.height)
+		case ScreenWelcome:
+			a.welcome = tui.NewWelcomeModel(a.width, a.height)
 		}
 		return a, nil
 	}
@@ -181,7 +210,42 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tui.ConnectMsg:
+		// Ask-at-connect: when the DSN carries a `{password}` placeholder
+		// without any backing secret (no keyring key, no env var), pop a
+		// modal asking the user for the password. The connect command
+		// runs only after the prompt resolves.
+		if msg.Conn.KeyringKey == "" && msg.Conn.DSNEnv == "" &&
+			strings.Contains(msg.Conn.DSN, secrets.PasswordPlaceholder) {
+			a.pendingConnectConn = msg.Conn
+			a.pwPrompt = tui.NewPasswordPromptModel(msg.Conn.Name, a.width, a.height)
+			a.modal = ModalPasswordPrompt
+			break
+		}
 		cmds = append(cmds, a.connectCmd(msg.Conn))
+
+	case tui.PasswordPromptSubmitMsg:
+		if a.pendingConnectConn.Name == "" {
+			a.modal = ModalNone
+			break
+		}
+		conn := a.pendingConnectConn
+		full, err := secrets.InjectPassword(conn.Engine, conn.DSN, msg.Password)
+		if err != nil {
+			a.pwPrompt.SetError(err.Error())
+			break
+		}
+		conn.DSN = full
+		// Clear keyring/env hints so connectCmd → ResolveDSN returns the DSN
+		// as-is (it already has the password substituted).
+		conn.KeyringKey = ""
+		conn.DSNEnv = ""
+		a.pendingConnectConn = config.Connection{}
+		a.modal = ModalNone
+		cmds = append(cmds, a.connectCmd(conn))
+
+	case tui.PasswordPromptCancelMsg:
+		a.pendingConnectConn = config.Connection{}
+		a.modal = ModalNone
 
 	case ConnectedMsg:
 		if _, live := a.inflight[msg.ReqID]; !live {
@@ -253,6 +317,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, a.reconnectCmd())
 
 	case tui.ConfirmYesMsg:
+		if a.pendingDeleteConn != "" {
+			cmds = append(cmds, a.deleteConnection(a.pendingDeleteConn))
+			a.pendingDeleteConn = ""
+			a.modal = ModalNone
+			break
+		}
 		if a.pendingTx != nil {
 			cmds = append(cmds, a.commitCmd(a.pendingTx))
 			a.pendingTx = nil
@@ -260,6 +330,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.modal = ModalNone
 
 	case tui.ConfirmNoMsg:
+		if a.pendingDeleteConn != "" {
+			a.pendingDeleteConn = ""
+			a.modal = ModalNone
+			break
+		}
 		if a.pendingTx != nil {
 			cmds = append(cmds, a.rollbackCmd(a.pendingTx))
 			a.pendingTx = nil
@@ -402,10 +477,51 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.modal = ModalNone
 
 	case tui.AddConnectionSubmitMsg:
-		// Don't save yet — verify the connection works first.
-		// If a separate password was supplied, inject it (URL-encoded) into the
-		// DSN before testing.
 		conn := msg.Connection
+
+		// Ask-at-connect intent: empty password field on a non-sqlite engine,
+		// either with a `{password}` placeholder typed explicitly or with no
+		// password info at all in the DSN. Save without a keyring entry, skip
+		// the test — the password will be requested at connect time.
+		if msg.Password == "" && conn.Engine != "sqlite" {
+			toSave := conn
+			needsAsk := false
+			if strings.Contains(conn.DSN, secrets.PasswordPlaceholder) {
+				needsAsk = true
+			} else {
+				_, _, hasEmbedded := secrets.SplitDSN(conn.Engine, conn.DSN)
+				if !hasEmbedded {
+					template, err := secrets.InjectPlaceholder(conn.Engine, conn.DSN)
+					if err != nil {
+						a.addConn.SetError(err.Error())
+						break
+					}
+					toSave.DSN = template
+					needsAsk = true
+				}
+			}
+			if needsAsk {
+				a.cfg.Connections = append(a.cfg.Connections, toSave)
+				if a.configPath == "" {
+					cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] no path resolved — connection added in-memory only")))
+				} else if err := config.Save(a.cfg, a.configPath); err != nil {
+					cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err)))
+				} else {
+					cmds = append(cmds, a.statusBar.SetMsg("connection saved (asks password on connect): "+toSave.Name))
+				}
+				a.modal = ModalNone
+				if a.screen == ScreenWelcome {
+					a.screen = ScreenConnPicker
+				}
+				if a.screen == ScreenConnPicker {
+					a.connPicker = tui.NewConnPickerModel(a.cfg.Connections, a.width, a.height)
+				}
+				break
+			}
+		}
+
+		// Standard path: a password was supplied (form field or embedded in
+		// DSN). Test the connection, then persist via keyring on success.
 		if msg.Password != "" {
 			full, err := secrets.InjectPassword(conn.Engine, conn.DSN, msg.Password)
 			if err != nil {
@@ -415,7 +531,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			conn.DSN = full
 		}
 		a.pendingPassword = msg.Password
-		a.pendingTemplateDSN = msg.Connection.DSN // remember the user-typed (no-password) DSN
+		a.pendingTemplateDSN = msg.Connection.DSN
 		a.addConn.SetTesting(true)
 		cmds = append(cmds, a.testConnectionCmd(conn))
 
@@ -452,6 +568,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, a.statusBar.SetMsg("connection saved: "+toSave.Name+suffix))
 		}
 		a.modal = ModalNone
+		// First-run flow: if we were on the welcome screen, advance to the
+		// connection picker now that there's something to pick.
+		if a.screen == ScreenWelcome {
+			a.screen = ScreenConnPicker
+		}
 		if a.screen == ScreenConnPicker {
 			a.connPicker = tui.NewConnPickerModel(a.cfg.Connections, a.width, a.height)
 		}
@@ -460,6 +581,113 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.pendingPassword = ""
 		a.pendingTemplateDSN = ""
 		a.modal = ModalNone
+
+	case tui.WelcomeAddConnectionMsg:
+		a.addConn = tui.NewAddConnectionModel(a.width, a.height)
+		a.modal = ModalAddConnection
+
+	case tui.WelcomeQuitMsg:
+		return a, tea.Quit
+
+	case tui.EditConnectionSubmitMsg:
+		conn := msg.Updated
+
+		// Original was ask-at-connect (placeholder DSN, no keyring, no env)
+		// and the user didn't supply a new password — there's nothing to
+		// test with, so save directly and stay in ask-at-connect mode.
+		if !msg.PasswordChanged &&
+			msg.Original.KeyringKey == "" &&
+			msg.Original.DSNEnv == "" &&
+			strings.Contains(msg.Original.DSN, secrets.PasswordPlaceholder) {
+			for i, c := range a.cfg.Connections {
+				if c.Name == msg.Original.Name {
+					a.cfg.Connections[i] = msg.Updated
+					break
+				}
+			}
+			if a.configPath == "" {
+				cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] no path resolved — connection updated in-memory only")))
+			} else if err := config.Save(a.cfg, a.configPath); err != nil {
+				cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err)))
+			} else {
+				cmds = append(cmds, a.statusBar.SetMsg("connection updated: "+msg.Updated.Name))
+			}
+			a.modal = ModalNone
+			if a.screen == ScreenConnPicker {
+				a.connPicker = tui.NewConnPickerModel(a.cfg.Connections, a.width, a.height)
+			}
+			break
+		}
+
+		if msg.PasswordChanged && msg.Password != "" {
+			full, err := secrets.InjectPassword(conn.Engine, conn.DSN, msg.Password)
+			if err != nil {
+				a.editConn.SetError(err.Error())
+				break
+			}
+			conn.DSN = full
+		} else if msg.Original.KeyringKey != "" || msg.Original.DSNEnv != "" {
+			// No new password supplied — resolve the existing secret to test
+			// the (possibly changed) DSN. The saved DSN remains a template.
+			resolved, err := secrets.ResolveDSN(conn.Engine, conn.DSN, msg.Original.KeyringKey, msg.Original.DSNEnv)
+			if err != nil {
+				a.editConn.SetError(err.Error())
+				break
+			}
+			conn.DSN = resolved
+		}
+		a.pendingEditOriginal = msg.Original
+		a.pendingEditPassword = msg.Password
+		a.pendingEditPasswordChanged = msg.PasswordChanged
+		a.editConn.SetTesting(true)
+		cmds = append(cmds, a.testEditConnectionCmd(conn))
+
+	case tui.EditConnectionCancelMsg:
+		a.pendingEditOriginal = config.Connection{}
+		a.pendingEditPassword = ""
+		a.pendingEditPasswordChanged = false
+		a.modal = ModalNone
+
+	case editTestConnResultMsg:
+		a.editConn.SetTesting(false)
+		if msg.err != nil {
+			a.editConn.SetTestError(msg.err.Error())
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[conn-test] %s: %v", msg.conn.Name, msg.err)))
+			a.pendingEditOriginal = config.Connection{}
+			a.pendingEditPassword = ""
+			a.pendingEditPasswordChanged = false
+			break
+		}
+		toSave, err := a.persistEditedConnection(a.pendingEditOriginal, msg.conn, a.pendingEditPassword, a.pendingEditPasswordChanged)
+		if err != nil {
+			a.editConn.SetError(err.Error())
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[secrets] %v", err)))
+			a.pendingEditOriginal = config.Connection{}
+			a.pendingEditPassword = ""
+			a.pendingEditPasswordChanged = false
+			break
+		}
+		// Replace the original entry in cfg.Connections by name.
+		for i, c := range a.cfg.Connections {
+			if c.Name == a.pendingEditOriginal.Name {
+				a.cfg.Connections[i] = toSave
+				break
+			}
+		}
+		a.pendingEditOriginal = config.Connection{}
+		a.pendingEditPassword = ""
+		a.pendingEditPasswordChanged = false
+		if a.configPath == "" {
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] no path resolved — connection updated in-memory only")))
+		} else if err := config.Save(a.cfg, a.configPath); err != nil {
+			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err)))
+		} else {
+			cmds = append(cmds, a.statusBar.SetMsg("connection updated: "+toSave.Name))
+		}
+		a.modal = ModalNone
+		if a.screen == ScreenConnPicker {
+			a.connPicker = tui.NewConnPickerModel(a.cfg.Connections, a.width, a.height)
+		}
 
 	case tui.AskSubmitMsg:
 		cmds = append(cmds, a.askAICmd(msg.Question))
@@ -540,6 +768,14 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 			var cmd tea.Cmd
 			a.addConn, cmd = a.addConn.Update(msg)
 			cmds = append(cmds, cmd)
+		case ModalEditConnection:
+			var cmd tea.Cmd
+			a.editConn, cmd = a.editConn.Update(msg)
+			cmds = append(cmds, cmd)
+		case ModalPasswordPrompt:
+			var cmd tea.Cmd
+			a.pwPrompt, cmd = a.pwPrompt.Update(msg)
+			cmds = append(cmds, cmd)
 		case ModalStagedView:
 			handled := false
 			if keyMsg, ok := msg.(tea.KeyMsg); ok {
@@ -604,13 +840,34 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 
 	// Active screen
 	switch a.screen {
+	case ScreenWelcome:
+		var cmd tea.Cmd
+		a.welcome, cmd = a.welcome.Update(msg)
+		cmds = append(cmds, cmd)
 	case ScreenConnPicker:
 		var cmd tea.Cmd
 		a.connPicker, cmd = a.connPicker.Update(msg)
 		cmds = append(cmds, cmd)
-		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "n" {
-			a.addConn = tui.NewAddConnectionModel(a.width, a.height)
-			a.modal = ModalAddConnection
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			switch keyMsg.String() {
+			case "n":
+				a.addConn = tui.NewAddConnectionModel(a.width, a.height)
+				a.modal = ModalAddConnection
+			case "e":
+				if sel, ok := a.connPicker.Selected(); ok {
+					a.editConn = tui.NewEditConnectionModel(sel, a.width, a.height)
+					a.modal = ModalEditConnection
+				}
+			case "d":
+				if sel, ok := a.connPicker.Selected(); ok {
+					a.pendingDeleteConn = sel.Name
+					a.confirm = tui.NewConfirmModel(
+						fmt.Sprintf("Delete connection %q?", sel.Name),
+						true,
+					)
+					a.modal = ModalConfirm
+				}
+			}
 		}
 	case ScreenSchemaBrowser:
 		var cmd tea.Cmd
@@ -710,6 +967,30 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 						}
 					}
 				}
+			case "y": // copy current cell value to clipboard
+				if row, col, ok := a.dataViewer.SelectedCell(); ok {
+					val := a.dataViewer.CellValue(row, col)
+					if err := clipboard.WriteAll(val); err != nil {
+						cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[clipboard] %v", err)))
+					} else {
+						cmds = append(cmds, a.statusBar.SetMsg("cell copied"))
+					}
+				}
+			case "Y": // copy marked rows (or current row) as TSV with header
+				tsv, n := a.copyRowsTSV()
+				if n == 0 {
+					cmds = append(cmds, a.statusBar.SetMsg("nothing to copy"))
+				} else if err := clipboard.WriteAll(tsv); err != nil {
+					cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[clipboard] %v", err)))
+				} else {
+					word := "row"
+					if n != 1 {
+						word = "rows"
+					}
+					cmds = append(cmds, a.statusBar.SetMsg(fmt.Sprintf("%d %s copied (TSV)", n, word)))
+				}
+			case " ": // toggle mark on current row
+				a.dataViewer.ToggleMark()
 			case "d": // delete row
 				if row, ok := a.dataViewer.SelectedRow(); ok {
 					table := a.dataViewer.Table()
@@ -729,12 +1010,18 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 					}
 				}
 			case "esc":
-				// Cancel any in-flight requests and go back to the schema browser.
-				for id, cancel := range a.inflight {
-					cancel()
-					delete(a.inflight, id)
+				// First Esc clears any active row marks so the user doesn't
+				// jump screens by accident with a selection live. Second Esc
+				// (or Esc with no marks) goes back to the schema browser.
+				if a.dataViewer.HasMarks() {
+					a.dataViewer.ClearMarks()
+				} else {
+					for id, cancel := range a.inflight {
+						cancel()
+						delete(a.inflight, id)
+					}
+					a.screen = ScreenSchemaBrowser
 				}
-				a.screen = ScreenSchemaBrowser
 			}
 		}
 	case ScreenAskPanel:
@@ -800,6 +1087,8 @@ func (a *App) View() string {
 
 	var body string
 	switch a.screen {
+	case ScreenWelcome:
+		body = lipgloss.Place(a.width, bodyHeight, lipgloss.Center, lipgloss.Center, a.welcome.View())
 	case ScreenConnPicker:
 		body = a.connPicker.View()
 	case ScreenSchemaBrowser:
@@ -834,6 +1123,10 @@ func (a *App) View() string {
 			overlay = a.saveView.View()
 		case ModalAddConnection:
 			overlay = a.addConn.View()
+		case ModalEditConnection:
+			overlay = a.editConn.View()
+		case ModalPasswordPrompt:
+			overlay = a.pwPrompt.View()
 		}
 		body = lipgloss.Place(a.width, bodyHeight, lipgloss.Center, lipgloss.Center, overlay)
 	}
@@ -904,6 +1197,10 @@ func (a *App) helpContext() tui.HelpContext {
 		return tui.HelpContextModalSaveView
 	case ModalAddConnection:
 		return tui.HelpContextModalAddConnection
+	case ModalEditConnection:
+		return tui.HelpContextModalEditConnection
+	case ModalPasswordPrompt:
+		return tui.HelpContextModalPasswordPrompt
 	}
 	if a.sqlBar.IsFocused() {
 		return tui.HelpContextSqlBarFocused
@@ -915,6 +1212,8 @@ func (a *App) helpContext() tui.HelpContext {
 		return tui.HelpContextDataViewer
 	case ScreenAskPanel:
 		return tui.HelpContextAskPanel
+	case ScreenWelcome:
+		return tui.HelpContextWelcome
 	}
 	return tui.HelpContextConnPicker
 }
@@ -1252,6 +1551,152 @@ func (a *App) persistConnection(conn config.Connection) (config.Connection, erro
 		DSN:        template,
 		KeyringKey: keyringKey,
 	}, nil
+}
+
+// copyRowsTSV builds a TSV-formatted clipboard payload for the marked rows
+// (or the row under the cursor when no marks are set). Returns the formatted
+// string and the row count that fed it. Tabs and newlines inside cell values
+// are replaced with spaces so the output stays well-formed for paste targets
+// like spreadsheets.
+func (a *App) copyRowsTSV() (string, int) {
+	rows := a.dataViewer.MarkedRows()
+	if len(rows) == 0 {
+		if r, ok := a.dataViewer.SelectedRow(); ok {
+			rows = []int{r}
+		} else {
+			return "", 0
+		}
+	}
+	headers := a.dataViewer.ColumnNames()
+	if len(headers) == 0 {
+		return "", 0
+	}
+	var sb strings.Builder
+	sb.WriteString(strings.Join(headers, "\t"))
+	sb.WriteByte('\n')
+	for _, idx := range rows {
+		vals := a.dataViewer.RowValues(idx)
+		for i, v := range vals {
+			v = strings.ReplaceAll(v, "\t", " ")
+			v = strings.ReplaceAll(v, "\r", " ")
+			v = strings.ReplaceAll(v, "\n", " ")
+			vals[i] = v
+		}
+		sb.WriteString(strings.Join(vals, "\t"))
+		sb.WriteByte('\n')
+	}
+	return sb.String(), len(rows)
+}
+
+// editTestConnResultMsg carries the outcome of an edit-connection test back
+// to Update so the modal can be dismissed (success) or annotated (failure).
+// Distinct from testConnResultMsg so the add and edit paths don't share state.
+type editTestConnResultMsg struct {
+	conn config.Connection
+	err  error
+}
+
+// testEditConnectionCmd is the edit-flow counterpart of testConnectionCmd.
+// Same probe semantics — a fresh driver, Connect+Ping, 5s timeout — but
+// emits editTestConnResultMsg.
+func (a *App) testEditConnectionCmd(conn config.Connection) tea.Cmd {
+	return func() tea.Msg {
+		drv, err := db.New(conn.Engine)
+		if err != nil {
+			return editTestConnResultMsg{conn: conn, err: err}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := drv.Connect(ctx, conn.DSN); err != nil {
+			return editTestConnResultMsg{conn: conn, err: err}
+		}
+		if err := drv.Ping(ctx); err != nil {
+			_ = drv.Close()
+			return editTestConnResultMsg{conn: conn, err: err}
+		}
+		_ = drv.Close()
+		return editTestConnResultMsg{conn: conn, err: nil}
+	}
+}
+
+// persistEditedConnection prepares an edited connection for storage.
+//
+// If passwordChanged is true, the literal password is stored in the OS
+// keyring (reusing original.KeyringKey when present, otherwise deriving a
+// new key from the updated name) and the DSN is rewritten to a template
+// containing the {password} placeholder. If passwordChanged is false, the
+// original.KeyringKey is preserved as-is — no secret rotation happens.
+//
+// The caller is responsible for clearing the pendingEdit* fields after.
+func (a *App) persistEditedConnection(original, updated config.Connection, password string, passwordChanged bool) (config.Connection, error) {
+	if !passwordChanged {
+		// Keep KeyringKey from original (form already copies it, but be explicit).
+		updated.KeyringKey = original.KeyringKey
+		return updated, nil
+	}
+	template, err := secrets.InjectPlaceholder(updated.Engine, updated.DSN)
+	if err != nil {
+		// DSN may already contain {password} or be password-less (e.g. SQLite).
+		// Fall back to the raw DSN.
+		template = updated.DSN
+	}
+	keyringKey := original.KeyringKey
+	if keyringKey == "" {
+		keyringKey = secrets.KeyringKeyFor(updated.Name)
+	}
+	if err := secrets.SetPassword(keyringKey, password); err != nil {
+		return updated, fmt.Errorf("OS keyring not available: %v\n\nPlaintext fallback is intentionally NOT used. Workarounds:\n  • Start your OS keyring service (gnome-keyring / KWallet on Linux)\n  • Or edit %s by hand to use:\n      dsn_env = \"YOURVAR\"\n    and export YOURVAR='<full DSN>' in your shell", err, a.configPath)
+	}
+	return config.Connection{
+		Name:       updated.Name,
+		Engine:     updated.Engine,
+		DSN:        template,
+		KeyringKey: keyringKey,
+		DSNEnv:     updated.DSNEnv,
+	}, nil
+}
+
+// deleteConnection removes a connection by name from cfg, persists the new
+// config, and best-effort removes its keyring secret. When the deletion
+// leaves the list empty, the screen swings back to the welcome state.
+// Returns a tea.Cmd that updates the status bar.
+func (a *App) deleteConnection(name string) tea.Cmd {
+	var idx = -1
+	var removed config.Connection
+	for i, c := range a.cfg.Connections {
+		if c.Name == name {
+			idx = i
+			removed = c
+			break
+		}
+	}
+	if idx < 0 {
+		return a.statusBar.SetErr(fmt.Errorf("[config] connection %q not found", name))
+	}
+	a.cfg.Connections = append(a.cfg.Connections[:idx], a.cfg.Connections[idx+1:]...)
+
+	// Best-effort: drop the keyring secret. We don't fail the delete if the
+	// keyring is unavailable — the TOML entry is gone, which is the user's
+	// intent.
+	if removed.KeyringKey != "" {
+		if err := secrets.DeletePassword(removed.KeyringKey); err != nil {
+			a.log.Warn("keyring delete failed", "key", removed.KeyringKey, "err", err)
+		}
+	}
+
+	if a.configPath != "" {
+		if err := config.Save(a.cfg, a.configPath); err != nil {
+			return a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err))
+		}
+	}
+
+	if len(a.cfg.Connections) == 0 {
+		a.screen = ScreenWelcome
+		a.welcome = tui.NewWelcomeModel(a.width, a.height)
+	} else if a.screen == ScreenConnPicker {
+		a.connPicker = tui.NewConnPickerModel(a.cfg.Connections, a.width, a.height)
+	}
+	return a.statusBar.SetMsg("connection deleted: " + name)
 }
 
 // reconnectCmd attempts to reconnect the active driver.

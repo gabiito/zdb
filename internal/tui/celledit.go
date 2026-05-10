@@ -4,7 +4,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textinput"
 
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 // CellEditModel is the cell edit modal using bubbles/textinput.

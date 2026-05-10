@@ -1,6 +1,6 @@
-# db-viewer configuration file
-# Copy this file to ~/.config/dbviewer/config.toml and customize it.
-# You can also set DBVIEWER_CONFIG=/path/to/config.toml to use a custom path.
+# zDB configuration file
+# Copy this file to ~/.config/zdb/config.toml and customize it.
+# You can also set ZDB_CONFIG=/path/to/config.toml to use a custom path.
 
 # ── Connections ───────────────────────────────────────────────────────────────
 # Add one [[connections]] block per database you want to connect to.

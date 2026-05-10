@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gabiito/db-viewer/internal/core"
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/core"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 func makeUsersTable(hasPK bool) *db.Table {

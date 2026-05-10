@@ -26,6 +26,9 @@ const (
 	HelpContextModalSaveView
 	HelpContextModalJoinChoice
 	HelpContextModalAddConnection
+	HelpContextModalEditConnection
+	HelpContextWelcome
+	HelpContextModalPasswordPrompt
 )
 
 var (
@@ -55,8 +58,15 @@ func bindingsFor(ctx HelpContext, aiEnabled bool) []helpItem {
 		return []helpItem{
 			{keys: "↑/↓", desc: "navigate"},
 			{keys: "Enter", desc: "connect"},
-			{keys: "n", desc: "new connection"},
+			{keys: "n", desc: "new"},
+			{keys: "e", desc: "edit"},
+			{keys: "d", desc: "delete"},
 			{keys: "Ctrl+c", desc: "quit"},
+		}
+	case HelpContextWelcome:
+		return []helpItem{
+			{keys: "n", desc: "add connection"},
+			{keys: "q", desc: "quit"},
 		}
 	case HelpContextSchemaBrowser:
 		return []helpItem{
@@ -77,6 +87,9 @@ func bindingsFor(ctx HelpContext, aiEnabled bool) []helpItem {
 			{keys: "Ctrl+f/b", desc: "page"},
 			{keys: "Enter", desc: "edit"},
 			{keys: "v", desc: "view"},
+			{keys: "y", desc: "copy cell"},
+			{keys: "Y", desc: "copy row(s) TSV"},
+			{keys: "Space", desc: "mark row"},
 			{keys: "s", desc: "save"},
 			{keys: "S", desc: "review staged"},
 			{keys: "D", desc: "discard staged"},
@@ -163,6 +176,18 @@ func bindingsFor(ctx HelpContext, aiEnabled bool) []helpItem {
 			{keys: "Tab", desc: "next field"},
 			{keys: "Shift+Tab", desc: "prev field"},
 			{keys: "Enter", desc: "save"},
+			{keys: "Esc", desc: "cancel"},
+		}
+	case HelpContextModalEditConnection:
+		return []helpItem{
+			{keys: "Tab", desc: "next field"},
+			{keys: "Shift+Tab", desc: "prev field"},
+			{keys: "Enter", desc: "save"},
+			{keys: "Esc", desc: "cancel"},
+		}
+	case HelpContextModalPasswordPrompt:
+		return []helpItem{
+			{keys: "Enter", desc: "connect"},
 			{keys: "Esc", desc: "cancel"},
 		}
 	}

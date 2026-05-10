@@ -7,9 +7,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/gabiito/db-viewer/internal/db"
-	"github.com/gabiito/db-viewer/internal/db/conformance"
-	_ "github.com/gabiito/db-viewer/internal/db/postgres"
+	"github.com/gabiito/zdb/internal/db"
+	"github.com/gabiito/zdb/internal/db/conformance"
+	_ "github.com/gabiito/zdb/internal/db/postgres"
 )
 
 func TestPostgresConformance(t *testing.T) {

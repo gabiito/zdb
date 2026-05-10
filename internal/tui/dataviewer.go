@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 // DataViewerModel renders a table with a real cell cursor (row + column).
@@ -43,6 +43,10 @@ type DataViewerModel struct {
 	// Optional per-column prefix (typically a JOIN alias). Same length as
 	// resultSet.Columns when set; nil disables prefixing.
 	colPrefixes []string
+
+	// Marked rows for multi-row copy. Keys are absolute indexes into
+	// resultSet.Rows. Empty map means no marks.
+	markedRows map[int]bool
 }
 
 // NewDataViewerModel creates a DataViewerModel for the given table.
@@ -73,6 +77,79 @@ func (m *DataViewerModel) SetLegend(s string) { m.legend = s }
 // SetColumnPrefixes sets per-column prefixes (e.g., JOIN aliases). Pass nil
 // or a slice of a different length than the resultSet columns to disable.
 func (m *DataViewerModel) SetColumnPrefixes(prefixes []string) { m.colPrefixes = prefixes }
+
+// ToggleMark toggles the mark on the row currently under the cursor. No-op
+// when there's no result set or the cursor is out of range.
+func (m *DataViewerModel) ToggleMark() {
+	if m.resultSet == nil || len(m.resultSet.Rows) == 0 {
+		return
+	}
+	if m.markedRows == nil {
+		m.markedRows = make(map[int]bool)
+	}
+	if m.markedRows[m.selectedRow] {
+		delete(m.markedRows, m.selectedRow)
+	} else {
+		m.markedRows[m.selectedRow] = true
+	}
+}
+
+// HasMarks reports whether any rows are currently marked.
+func (m DataViewerModel) HasMarks() bool { return len(m.markedRows) > 0 }
+
+// MarkCount returns the number of marked rows.
+func (m DataViewerModel) MarkCount() int { return len(m.markedRows) }
+
+// ClearMarks removes all row marks.
+func (m *DataViewerModel) ClearMarks() { m.markedRows = nil }
+
+// MarkedRows returns the marked rows in ascending order by index. Returns nil
+// when no marks are set.
+func (m DataViewerModel) MarkedRows() []int {
+	if len(m.markedRows) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(m.markedRows))
+	for i := range m.markedRows {
+		out = append(out, i)
+	}
+	// Insertion sort — N is small (page-bounded user marks).
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1] > out[j]; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out
+}
+
+// ColumnNames returns all column names in the current result set, in order.
+// Empty slice when no result set is loaded.
+func (m DataViewerModel) ColumnNames() []string {
+	if m.resultSet == nil {
+		return nil
+	}
+	names := make([]string, len(m.resultSet.Columns))
+	for i, c := range m.resultSet.Columns {
+		names[i] = c.Name
+	}
+	return names
+}
+
+// RowValues returns the formatted string values for the row at the given
+// absolute index. Returns nil when out of range.
+func (m DataViewerModel) RowValues(row int) []string {
+	if m.resultSet == nil || row < 0 || row >= len(m.resultSet.Rows) {
+		return nil
+	}
+	r := m.resultSet.Rows[row]
+	out := make([]string, len(m.resultSet.Columns))
+	for j := range m.resultSet.Columns {
+		if j < len(r.Cells) {
+			out[j] = formatCellValue(r.Cells[j])
+		}
+	}
+	return out
+}
 
 // ResultSetColumnCount returns the number of columns in the current result set.
 func (m DataViewerModel) ResultSetColumnCount() int {
@@ -172,6 +249,7 @@ func (m *DataViewerModel) SetData(rs *db.ResultSet) {
 		m.selectedCol = 0
 	}
 	m.firstVisibleCol = 0
+	m.markedRows = nil
 	m.adjustHScroll()
 }
 
@@ -313,6 +391,7 @@ func (m DataViewerModel) View() string {
 	headerStyle := StyleTitle.Padding(0, 1)
 	rowHighlight := StyleSelectedRow.Padding(0, 1)
 	cellHighlight := StyleSelectedCell.Padding(0, 1)
+	markedHighlight := StyleMarkedRow.Padding(0, 1)
 
 	visibleSelectedCol := m.selectedCol - firstCol
 
@@ -330,6 +409,9 @@ func (m DataViewerModel) View() string {
 			}
 			if row == selectedRowInPage {
 				return rowHighlight
+			}
+			if m.markedRows[pageStart+row] {
+				return markedHighlight
 			}
 			return cellPadding
 		})
@@ -362,11 +444,15 @@ func (m DataViewerModel) View() string {
 		colWindow = fmt.Sprintf(" %s[%d–%d/%d]%s", hasLeft, firstCol+1, lastCol, totalCols, hasRight)
 	}
 	sb.WriteString("\n")
+	marksSuffix := ""
+	if n := len(m.markedRows); n > 0 {
+		marksSuffix = fmt.Sprintf(" · %d marked", n)
+	}
 	sb.WriteString(StyleHelp.Render(fmt.Sprintf(
-		"Row %d/%d · Page %d/%d · Col %d/%d: %s%s",
+		"Row %d/%d · Page %d/%d · Col %d/%d: %s%s%s",
 		m.selectedRow+1, len(m.resultSet.Rows),
 		pageNum, totalPages,
-		m.selectedCol+1, totalCols, colName, colWindow,
+		m.selectedCol+1, totalCols, colName, colWindow, marksSuffix,
 	)))
 
 	return sb.String()

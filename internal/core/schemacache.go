@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 // SchemaCache holds the in-memory introspected schema for the active connection.

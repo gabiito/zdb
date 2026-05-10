@@ -1,4 +1,4 @@
-module github.com/gabiito/db-viewer
+module github.com/gabiito/zdb
 
 go 1.25.0
 

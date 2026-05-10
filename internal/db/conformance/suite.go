@@ -7,7 +7,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 // SeedFn is called before the conformance suite runs to create the required schema

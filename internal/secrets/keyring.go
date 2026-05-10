@@ -10,10 +10,10 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-// ServiceName is the keyring service identifier under which all dbviewer
+// ServiceName is the keyring service identifier under which all zdb
 // secrets are stored. Keys within the service are typically the connection
-// name (or a `dbviewer/<name>` derivative).
-const ServiceName = "dbviewer"
+// name (or a `zdb/<name>` derivative).
+const ServiceName = "zdb"
 
 // SetPassword stores a password in the OS keyring under the given key.
 func SetPassword(key, password string) error {
@@ -43,7 +43,7 @@ func IsNotFound(err error) bool {
 // backend responds (with either a real value or ErrNotFound). Used at
 // startup to warn the user when no keyring service is reachable.
 func Available() bool {
-	_, err := keyring.Get(ServiceName, "__dbviewer_probe__")
+	_, err := keyring.Get(ServiceName, "__zdb_probe__")
 	if err == nil {
 		return true
 	}

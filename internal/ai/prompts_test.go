@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gabiito/db-viewer/internal/ai"
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/ai"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 func makeTestSchema(tableCount int) *db.Schema {

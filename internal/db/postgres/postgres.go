@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	internaldb "github.com/gabiito/db-viewer/internal/db"
+	internaldb "github.com/gabiito/zdb/internal/db"
 )
 
 func init() {

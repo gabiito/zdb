@@ -9,7 +9,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql" // register the mysql driver
 
-	internaldb "github.com/gabiito/db-viewer/internal/db"
+	internaldb "github.com/gabiito/zdb/internal/db"
 )
 
 func init() {

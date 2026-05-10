@@ -10,66 +10,81 @@ import (
 	"github.com/gabiito/zdb/internal/config"
 )
 
-// AddConnectionSubmitMsg is emitted when the form passes validation.
-// Password, when non-empty, holds the literal password the user typed in
-// the dedicated field — the App is expected to URL-encode it when building
-// the DSN to test, and to store it in the keyring after a successful test.
-// The Connection.DSN in that case is treated as a template (no password).
-type AddConnectionSubmitMsg struct {
-	Connection config.Connection
-	Password   string
+// EditConnectionSubmitMsg is emitted when the edit form passes local
+// validation. The Original field carries the connection as it was BEFORE the
+// edit so the App can locate the entry to replace and (if the name changed)
+// migrate the keyring secret. PasswordChanged is true when the user typed
+// something into the password field — when false, the existing keyring entry
+// is preserved as-is.
+type EditConnectionSubmitMsg struct {
+	Original        config.Connection
+	Updated         config.Connection
+	Password        string
+	PasswordChanged bool
 }
 
-// AddConnectionCancelMsg is emitted on Esc.
-type AddConnectionCancelMsg struct{}
+// EditConnectionCancelMsg is emitted on Esc.
+type EditConnectionCancelMsg struct{}
 
-// AddConnectionModel is a 4-field form: Name, Engine, DSN, Password (optional).
-type AddConnectionModel struct {
+// EditConnectionModel is the form for editing an existing connection. It
+// pre-fills name, engine, and DSN from the original connection. The password
+// field is always blank — the user types a new password only when they want
+// to rotate it.
+type EditConnectionModel struct {
+	original      config.Connection
 	nameInput     textinput.Model
 	engine        EngineSelectorModel
 	dsnInput      textinput.Model
 	passwordInput textinput.Model
-	focused       int // 0 name, 1 engine, 2 dsn, 3 password
+	focused       int
 	width         int
 	height        int
 	errMsg        string
 	testing       bool
 }
 
-// SetTesting toggles the in-progress flag (App calls this while the connection
-// is being verified asynchronously).
-func (m *AddConnectionModel) SetTesting(v bool) { m.testing = v }
+// SetTesting toggles the in-progress flag while the App tests the edited
+// connection asynchronously.
+func (m *EditConnectionModel) SetTesting(v bool) { m.testing = v }
 
 // SetTestError displays an async test failure inside the modal.
-func (m *AddConnectionModel) SetTestError(s string) { m.errMsg = "test failed: " + s; m.testing = false }
+func (m *EditConnectionModel) SetTestError(s string) {
+	m.errMsg = "test failed: " + s
+	m.testing = false
+}
 
-// SetError displays an arbitrary error message (e.g. keyring failure after
-// a successful connection test) without the "test failed" prefix.
-func (m *AddConnectionModel) SetError(s string) { m.errMsg = s; m.testing = false }
+// SetError displays an arbitrary error message.
+func (m *EditConnectionModel) SetError(s string) {
+	m.errMsg = s
+	m.testing = false
+}
 
-// NewAddConnectionModel builds a fresh form sized for the terminal.
-func NewAddConnectionModel(width, height int) AddConnectionModel {
+// NewEditConnectionModel builds an edit form pre-filled from the given
+// connection. The DSN shown is the stored DSN, which may contain a
+// `{password}` placeholder — that's fine, the form treats it as a template.
+func NewEditConnectionModel(original config.Connection, width, height int) EditConnectionModel {
 	name := textinput.New()
-	name.Placeholder = "name (e.g., demo-sqlite)"
 	name.CharLimit = 60
 	name.Width = 50
+	name.SetValue(original.Name)
 	name.Focus()
 
-	engine := NewEngineSelector("sqlite")
+	engine := NewEngineSelector(original.Engine)
 
 	dsn := textinput.New()
-	dsn.Placeholder = "/path/file.db · postgres://user@host/db · user@tcp(host:3306)/db"
 	dsn.CharLimit = 1024
 	dsn.Width = 50
+	dsn.SetValue(original.DSN)
 
 	password := textinput.New()
-	password.Placeholder = "leave empty if DSN already has it (URL-encoded)"
+	password.Placeholder = "leave empty to keep the current password"
 	password.CharLimit = 256
 	password.Width = 50
 	password.EchoMode = textinput.EchoPassword
 	password.EchoCharacter = '•'
 
-	return AddConnectionModel{
+	return EditConnectionModel{
+		original:      original,
 		nameInput:     name,
 		engine:        engine,
 		dsnInput:      dsn,
@@ -81,21 +96,20 @@ func NewAddConnectionModel(width, height int) AddConnectionModel {
 }
 
 // Init satisfies tea.Model.
-func (m AddConnectionModel) Init() tea.Cmd { return textinput.Blink }
+func (m EditConnectionModel) Init() tea.Cmd { return textinput.Blink }
 
-// Update handles Tab cycling and Enter submission.
-func (m AddConnectionModel) Update(msg tea.Msg) (AddConnectionModel, tea.Cmd) {
-	// While the App is testing the connection, only allow Esc.
+// Update handles Tab cycling, Enter submission, and Esc cancellation.
+func (m EditConnectionModel) Update(msg tea.Msg) (EditConnectionModel, tea.Cmd) {
 	if m.testing {
 		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "esc" {
-			return m, func() tea.Msg { return AddConnectionCancelMsg{} }
+			return m, func() tea.Msg { return EditConnectionCancelMsg{} }
 		}
 		return m, nil
 	}
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		switch keyMsg.String() {
 		case "esc":
-			return m, func() tea.Msg { return AddConnectionCancelMsg{} }
+			return m, func() tea.Msg { return EditConnectionCancelMsg{} }
 		case "tab":
 			m.focused = (m.focused + 1) % 4
 			m.refocus()
@@ -108,7 +122,7 @@ func (m AddConnectionModel) Update(msg tea.Msg) (AddConnectionModel, tea.Cmd) {
 			name := strings.TrimSpace(m.nameInput.Value())
 			engine := m.engine.Value()
 			dsn := strings.TrimSpace(m.dsnInput.Value())
-			password := m.passwordInput.Value() // do NOT trim — passwords may begin/end with whitespace
+			password := m.passwordInput.Value()
 			if name == "" {
 				m.errMsg = "name required"
 				m.focused = 0
@@ -121,10 +135,19 @@ func (m AddConnectionModel) Update(msg tea.Msg) (AddConnectionModel, tea.Cmd) {
 				m.refocus()
 				return m, nil
 			}
+			updated := config.Connection{
+				Name:       name,
+				Engine:     engine,
+				DSN:        dsn,
+				KeyringKey: m.original.KeyringKey,
+				DSNEnv:     m.original.DSNEnv,
+			}
 			return m, func() tea.Msg {
-				return AddConnectionSubmitMsg{
-					Connection: config.Connection{Name: name, Engine: engine, DSN: dsn},
-					Password:   password,
+				return EditConnectionSubmitMsg{
+					Original:        m.original,
+					Updated:         updated,
+					Password:        password,
+					PasswordChanged: password != "",
 				}
 			}
 		}
@@ -144,7 +167,7 @@ func (m AddConnectionModel) Update(msg tea.Msg) (AddConnectionModel, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *AddConnectionModel) refocus() {
+func (m *EditConnectionModel) refocus() {
 	m.nameInput.Blur()
 	m.engine.Blur()
 	m.dsnInput.Blur()
@@ -162,7 +185,7 @@ func (m *AddConnectionModel) refocus() {
 }
 
 // View renders the bordered form.
-func (m AddConnectionModel) View() string {
+func (m EditConnectionModel) View() string {
 	boxW := m.width - 8
 	if boxW < 60 {
 		boxW = 60
@@ -173,18 +196,18 @@ func (m AddConnectionModel) View() string {
 
 	label := func(text string, idx int) string {
 		if m.focused == idx {
-			return lipgloss.NewStyle().Foreground(lipgloss.Color("114")).Bold(true).Render("▸ "+text)
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("114")).Bold(true).Render("▸ " + text)
 		}
 		return StyleDim.Render("  " + text)
 	}
 
-	body := StyleTitle.Render("Add database connection") + "\n\n" +
+	body := StyleTitle.Render("Edit connection: "+m.original.Name) + "\n\n" +
 		label("Name", 0) + "\n" + m.nameInput.View() + "\n\n" +
 		label("Engine", 1) + "\n" + m.engine.View() + "\n" +
 		StyleDim.Render("    ←/→ to choose") + "\n\n" +
 		label("DSN", 2) + "\n" + m.dsnInput.View() + "\n\n" +
-		label("Password (optional)", 3) + "\n" + m.passwordInput.View() + "\n" +
-		StyleDim.Render("    fill this if your password contains @ or other special chars\n    when filled, the DSN is treated as a template (without password)") + "\n"
+		label("New password (optional)", 3) + "\n" + m.passwordInput.View() + "\n" +
+		StyleDim.Render("    leave empty to keep the existing password in the keyring") + "\n"
 
 	if m.errMsg != "" {
 		body += "\n" + StyleError.Render(m.errMsg) + "\n"

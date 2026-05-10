@@ -1,5 +1,5 @@
-// Package logging provides structured logging for db-viewer.
-// It writes JSON to a file under $XDG_STATE_HOME/dbviewer/ and never to stderr,
+// Package logging provides structured logging for zDB.
+// It writes JSON to a file under $XDG_STATE_HOME/zdb/ and never to stderr,
 // since Bubbletea owns the terminal after tea.NewProgram starts.
 package logging
 
@@ -49,5 +49,5 @@ func logFilePath() (string, error) {
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(base, "dbviewer", "log"), nil
+	return filepath.Join(base, "zdb", "log"), nil
 }

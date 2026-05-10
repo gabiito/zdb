@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gabiito/db-viewer/internal/core"
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/core"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 // mockDriver is a minimal db.Driver that returns a hardcoded schema for testing.

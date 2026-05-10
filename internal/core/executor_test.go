@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/gabiito/db-viewer/internal/core"
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/core"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 // mockTx records calls made to it.

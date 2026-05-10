@@ -25,7 +25,7 @@ type Store struct {
 	path string
 }
 
-// NewStore resolves the views file path under the dbviewer config directory.
+// NewStore resolves the views file path under the zdb config directory.
 // The directory is created on first save if it doesn't exist.
 func NewStore() (*Store, error) {
 	dir, err := configDir()
@@ -113,15 +113,15 @@ type wrapper struct {
 }
 
 func configDir() (string, error) {
-	if p := os.Getenv("DBVIEWER_CONFIG"); p != "" {
+	if p := os.Getenv("ZDB_CONFIG"); p != "" {
 		return filepath.Dir(p), nil
 	}
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "dbviewer"), nil
+		return filepath.Join(x, "zdb"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "dbviewer"), nil
+	return filepath.Join(home, ".config", "zdb"), nil
 }

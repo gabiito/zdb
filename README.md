@@ -1,4 +1,4 @@
-# db-viewer
+# zDB
 
 A single-binary terminal database viewer and editor built with Go + Bubbletea.
 Supports SQLite, PostgreSQL, and MySQL. Optional AI-powered SQL assistance via
@@ -9,16 +9,16 @@ any OpenAI-compatible HTTP API (OpenAI, Ollama, Groq, etc.).
 **From source:**
 
 ```sh
-go install github.com/gabiito/db-viewer/cmd/dbviewer@latest
+go install github.com/gabiito/zdb/cmd/zdb@latest
 ```
 
 **Build locally (CGO-free):**
 
 ```sh
-git clone https://github.com/gabiito/db-viewer
-cd db-viewer
+git clone https://github.com/gabiito/zdb
+cd zDB
 make build
-# binary at bin/dbviewer
+# binary at bin/zdb
 ```
 
 **Cross-compile:**
@@ -32,7 +32,7 @@ GOOS=darwin  GOARCH=arm64 make build
 
 ## Configure
 
-Create `~/.config/dbviewer/config.toml` (or set `$DBVIEWER_CONFIG` to a custom path):
+Create `~/.config/zdb/config.toml` (or set `$ZDB_CONFIG` to a custom path):
 
 ```toml
 [[connections]]
@@ -58,9 +58,9 @@ See `examples/config.toml` for more provider examples (Ollama, Groq).
 ## Basic Usage
 
 ```
-dbviewer               # read config from default path
-DBVIEWER_CONFIG=/path/to/config.toml dbviewer
-DBVIEWER_DEBUG=1 dbviewer   # enable debug logging (to XDG_STATE_HOME/dbviewer/log)
+zdb               # read config from default path
+ZDB_CONFIG=/path/to/config.toml zdb
+ZDB_DEBUG=1 zdb   # enable debug logging (to XDG_STATE_HOME/zdb/log)
 ```
 
 ### Keybindings
@@ -99,7 +99,7 @@ api_key_env = "OPENAI_API_KEY"
 
 ```sh
 export OPENAI_API_KEY=sk-...
-dbviewer
+zdb
 ```
 
 ### Ollama (local)

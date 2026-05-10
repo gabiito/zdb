@@ -1,7 +1,7 @@
 .PHONY: build test test-integration lint fmt run
 
 build:
-	CGO_ENABLED=0 go build -o bin/dbviewer ./cmd/dbviewer
+	CGO_ENABLED=0 go build -o bin/zdb ./cmd/zdb
 
 test:
 	go test ./...
@@ -16,4 +16,4 @@ fmt:
 	gofmt -w .
 
 run:
-	go run ./cmd/dbviewer
+	go run ./cmd/zdb

@@ -74,6 +74,13 @@ var (
 				Foreground(lipgloss.AdaptiveColor{Light: "231", Dark: "231"}).
 				Background(lipgloss.AdaptiveColor{Light: "201", Dark: "205"})
 
+	// Marked row in the data viewer (selection set for multi-row copy).
+	// Uses a softer, distinct hue from the cursor so a row can be marked
+	// AND under the cursor without losing the cursor's visual primacy.
+	StyleMarkedRow = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "16", Dark: "231"}).
+			Background(lipgloss.AdaptiveColor{Light: "228", Dark: "100"})
+
 	// Active pane border
 	StyleActiveBorder = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).

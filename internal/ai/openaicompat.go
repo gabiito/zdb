@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 // chatMessage represents a single message in the OpenAI chat format.

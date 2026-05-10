@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/gabiito/db-viewer/internal/db"
+	"github.com/gabiito/zdb/internal/db"
 )
 
 // ErrAIDisabled is returned by NoOp provider methods.

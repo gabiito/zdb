@@ -9,6 +9,7 @@ const (
 	ScreenDataViewer
 	ScreenSqlPanel
 	ScreenAskPanel
+	ScreenWelcome // shown on first run when no connections are configured
 )
 
 // Modal identifies an active modal overlay (rendered above the active screen).
@@ -26,6 +27,8 @@ const (
 	ModalSaveView // textinput to name a saved view (triggered by 'W')
 	ModalJoinChoice // add-vs-replace prompt when J is pressed on a join chain
 	ModalAddConnection // form for adding a new DB connection from the conn picker
+	ModalEditConnection // form for editing the selected connection in the picker
+	ModalPasswordPrompt // single-field prompt asked at connect time when no secret is stored
 )
 
 // FocusState tracks which sub-component owns keyboard input within a screen.

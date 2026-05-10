@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zdb-postgres
+    environment:
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: school
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d school"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  mysql:
+    image: mysql:8.0
+    container_name: zdb-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: dev
+      MYSQL_DATABASE: school
+      MYSQL_USER: dev
+      MYSQL_PASSWORD: dev
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-udev", "-pdev"]
+      interval: 3s
+      timeout: 5s
+      retries: 20

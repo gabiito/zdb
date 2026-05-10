@@ -151,5 +151,5 @@ func InjectPlaceholder(engine, dsn string) (string, error) {
 
 // KeyringKeyFor returns the canonical keyring key for a given connection.
 func KeyringKeyFor(connectionName string) string {
-	return "dbviewer/" + connectionName
+	return "zdb/" + connectionName
 }
