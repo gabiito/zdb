@@ -173,7 +173,7 @@ func (m AddConnectionModel) View() string {
 
 	label := func(text string, idx int) string {
 		if m.focused == idx {
-			return lipgloss.NewStyle().Foreground(lipgloss.Color("114")).Bold(true).Render("▸ "+text)
+			return lipgloss.NewStyle().Foreground(CtpGreen).Bold(true).Render("▸ "+text)
 		}
 		return StyleDim.Render("  " + text)
 	}
@@ -191,7 +191,7 @@ func (m AddConnectionModel) View() string {
 	}
 	if m.testing {
 		body += "\n" + lipgloss.NewStyle().
-			Foreground(lipgloss.Color("214")).
+			Foreground(CtpPeach).
 			Bold(true).
 			Render("⏳ Testing connection...") + "\n"
 	}
@@ -204,7 +204,7 @@ func (m AddConnectionModel) View() string {
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("114")).
+		BorderForeground(CtpGreen).
 		Padding(1, 2).
 		Width(boxW).
 		Render(body)

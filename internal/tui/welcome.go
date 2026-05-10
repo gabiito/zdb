@@ -55,7 +55,7 @@ func (m WelcomeModel) View() string {
 	}
 
 	title := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("114")).
+		Foreground(CtpGreen).
 		Bold(true).
 		Render("Welcome to zDB")
 
@@ -64,11 +64,11 @@ func (m WelcomeModel) View() string {
 	)
 
 	keyN := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("39")).
+		Foreground(CtpSapphire).
 		Bold(true).
 		Render("[n]")
 	keyQ := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("39")).
+		Foreground(CtpSapphire).
 		Bold(true).
 		Render("[q]")
 
@@ -79,7 +79,7 @@ func (m WelcomeModel) View() string {
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("114")).
+		BorderForeground(CtpGreen).
 		Padding(1, 3).
 		Width(boxW).
 		Align(lipgloss.Center).

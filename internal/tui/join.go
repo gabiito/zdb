@@ -132,8 +132,8 @@ func NewJoinWizardModel(leftTable *db.Table, cache JoinCache, width, height int)
 	listW, listH := joinListDims(width, height)
 
 	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(lipgloss.Color("205"))
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(lipgloss.Color("205"))
+	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(CtpPink)
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(CtpPink)
 
 	tableList := list.New(items, delegate, listW, listH)
 	tableList.Title = "Pick the table to JOIN with"
@@ -175,8 +175,8 @@ func newColList(title string, cols []db.Column, w, h int) list.Model {
 		items[i] = joinColItem{col: c}
 	}
 	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(lipgloss.Color("205"))
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(lipgloss.Color("205"))
+	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(CtpPink)
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(CtpPink)
 
 	l := list.New(items, delegate, w, h)
 	l.Title = title
@@ -367,12 +367,12 @@ func (m JoinWizardModel) View() string {
 	}
 
 	divider := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")).
+		Foreground(CtpOverlay0).
 		Render(strings.Repeat("─", boxW-6))
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("33")).
+		BorderForeground(CtpBlue).
 		Padding(1, 2).
 		Width(boxW).
 		Render(
@@ -433,8 +433,8 @@ func (m JoinWizardModel) selectionsHeader() string {
 	}, "\n")
 }
 
-func doneMark() string    { return lipgloss.NewStyle().Foreground(lipgloss.Color("114")).Bold(true).Render("✓") }
-func pendingMark() string { return lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("○") }
+func doneMark() string    { return lipgloss.NewStyle().Foreground(CtpGreen).Bold(true).Render("✓") }
+func pendingMark() string { return lipgloss.NewStyle().Foreground(CtpOverlay0).Render("○") }
 
 // livePreview renders the SQL the wizard would emit if Enter were pressed
 // right now. Pieces still pending render as dim placeholders.

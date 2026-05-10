@@ -8,23 +8,31 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Token-type styles. We map chroma's classifications onto adaptive lipgloss
-// styles so the bar reads cleanly on both dark and light terminals.
+// Token-type styles. Catppuccin convention:
+//   keyword = Mauve, function/builtin = Blue (NameBuiltin maps via
+//   sqlNameStyle when needed), number = Peach, string = Green,
+//   comment = Overlay2 italic, operator = Sky, punctuation = Overlay1.
 var (
 	sqlKeywordStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "57", Dark: "171"}).
+			Foreground(CtpMauve).
 			Bold(true)
 	sqlStringStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "114"})
+			Foreground(CtpGreen)
 	sqlNumberStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "166", Dark: "173"})
+			Foreground(CtpPeach)
 	sqlCommentStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("241")).
+			Foreground(CtpOverlay2).
 			Italic(true)
 	sqlOperatorStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.AdaptiveColor{Light: "126", Dark: "219"})
-	sqlNameStyle     = lipgloss.NewStyle()
-	sqlPunctStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+				Foreground(CtpSky)
+	// Plain identifiers (table names, column names, aliases) stay at the
+	// terminal's default foreground — chroma's SQL lexer doesn't reliably
+	// distinguish function calls from other names, so coloring everything
+	// blue would over-saturate the preview. Only keywords / strings /
+	// numbers / operators get color emphasis.
+	sqlNameStyle           = lipgloss.NewStyle()
+	sqlNameBuiltinStyle    = lipgloss.NewStyle().Foreground(CtpBlue)
+	sqlPunctStyle          = lipgloss.NewStyle().Foreground(CtpOverlay1)
 )
 
 // sqlLexer is the chroma SQL lexer; resolved once at package init.
@@ -73,6 +81,8 @@ func styleForToken(tt chroma.TokenType) lipgloss.Style {
 		return sqlOperatorStyle
 	case tt == chroma.Punctuation:
 		return sqlPunctStyle
+	case tt == chroma.NameBuiltin, tt == chroma.NameFunction:
+		return sqlNameBuiltinStyle
 	case tt.InCategory(chroma.Name):
 		return sqlNameStyle
 	default:

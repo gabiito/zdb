@@ -97,7 +97,7 @@ func (m PasswordPromptModel) View() string {
 	}
 	if m.connecting {
 		body += "\n" + lipgloss.NewStyle().
-			Foreground(lipgloss.Color("214")).
+			Foreground(CtpPeach).
 			Bold(true).
 			Render("⏳ Connecting...") + "\n"
 	}
@@ -110,7 +110,7 @@ func (m PasswordPromptModel) View() string {
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("114")).
+		BorderForeground(CtpGreen).
 		Padding(1, 2).
 		Width(boxW).
 		Render(body)

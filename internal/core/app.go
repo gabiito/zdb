@@ -53,6 +53,7 @@ type App struct {
 	editConn     tui.EditConnectionModel
 	welcome      tui.WelcomeModel
 	pwPrompt     tui.PasswordPromptModel
+	sqlEditor    tui.SQLEditorModel
 	statusBar    tui.StatusBarModel
 	spinner      spinner.Model
 
@@ -94,6 +95,15 @@ type App struct {
 	dbPageSize   int
 	pageDir      int
 	dbNextOffset int
+
+	// Tab strip state. tabs[0] is always the fixed Schema tab; tabs[1:]
+	// are data tabs (table view or SQL result). activeTab indexes the
+	// currently-focused tab. lastDataTab tracks the most recently active
+	// data tab so opening a table from the schema tab can reuse it
+	// without forcing a new tab on every Enter.
+	tabs        []*Tab
+	activeTab   int
+	lastDataTab int
 
 	// joinChain mirrors the JOIN sequence currently materialized in the data
 	// viewer (alias + table per step). Empty when no wizard-built JOIN is
@@ -152,17 +162,18 @@ func NewApp(cfg config.Config, log *slog.Logger) *App {
 	}
 
 	return &App{
-		cfg:        cfg,
-		log:        log,
-		ai:         provider,
-		edit:       &EditBuffer{},
-		exec:       &Executor{},
-		screen:     startScreen,
-		inflight:   make(map[string]context.CancelFunc),
-		spinner:    s,
-		sqlBar:     tui.NewSqlBarModel(80),
-		viewsStore: store,
-		configPath: configPath,
+		cfg:         cfg,
+		log:         log,
+		ai:          provider,
+		edit:        &EditBuffer{},
+		exec:        &Executor{},
+		screen:      startScreen,
+		inflight:    make(map[string]context.CancelFunc),
+		spinner:     s,
+		sqlBar:      tui.NewSqlBarModel(80),
+		viewsStore:  store,
+		configPath:  configPath,
+		lastDataTab: -1,
 	}
 }
 
@@ -191,6 +202,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.connPicker = tui.NewConnPickerModel(a.cfg.Connections, a.width, a.height)
 		case ScreenWelcome:
 			a.welcome = tui.NewWelcomeModel(a.width, a.height)
+		case ScreenSQLEditor:
+			a.sqlEditor.SetSize(a.width, a.height)
 		}
 		return a, nil
 	}
@@ -286,13 +299,36 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[db] schema introspection failed")))
 		} else {
 			// Schema is already stored in cache by the cmd; transition to schema browser
-			a.screen = ScreenSchemaBrowser
 			a.schemaBrow = tui.NewSchemaBrowserModel(a.cache.Tables(), &a.cache, a.width, a.height)
 			a.refreshSqlBarSchema()
+			a.initTabs() // sets activeTab = 0 (Schema) and clears lastDataTab
+			a.screen = ScreenSchemaBrowser
 		}
 
 	case tui.OpenTableMsg:
 		if msg.Table != nil {
+			// Tab routing: by default reuse the active data tab (or the
+			// most recently active one if we're currently on the schema
+			// tab). Ctrl+Enter explicitly forces a new tab.
+			a.saveActiveDataTab()
+
+			targetIdx := -1
+			if !msg.NewTab {
+				// Reuse the active data tab if any.
+				if a.activeTab > 0 && a.tabs[a.activeTab].Kind == TabData {
+					targetIdx = a.activeTab
+				} else if a.lastDataTab > 0 {
+					targetIdx = a.lastDataTab
+				}
+			}
+			if targetIdx < 0 {
+				targetIdx = a.addDataTab(msg.Table.Name)
+			} else {
+				a.tabs[targetIdx].Title = msg.Table.Name
+				a.activeTab = targetIdx
+				a.lastDataTab = targetIdx
+			}
+
 			a.screen = ScreenDataViewer
 			a.dbPageSize = 50
 			a.dbOffset = 0
@@ -487,10 +523,57 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, a.statusBar.SetMsg("changes discarded"))
 		}
 
-	case tui.SqlExecuteMsg:
-		a.lastSQL = msg.SQL
-		cmds = append(cmds, a.execSQLCmd(msg.SQL))
+	case tui.SQLEditorRunMsg:
+		sql := strings.TrimSpace(msg.SQL)
+		if sql == "" {
+			cmds = append(cmds, a.statusBar.SetMsg("nothing to run"))
+			break
+		}
+		a.lastSQL = sql
 		a.screen = ScreenDataViewer
+		cmds = append(cmds, a.execSQLCmd(sql))
+
+	case tui.SQLEditorSaveViewMsg:
+		sql := strings.TrimSpace(msg.SQL)
+		if sql == "" {
+			cmds = append(cmds, a.statusBar.SetMsg("nothing to save"))
+			break
+		}
+		a.lastSQL = sql
+		a.saveView = tui.NewSaveViewModel(sql, a.width, a.height)
+		a.modal = ModalSaveView
+
+	case tui.SQLEditorCancelMsg:
+		// Going back from the editor — preserve buffer for next open.
+		// If a table was previously open, return to the data viewer;
+		// otherwise to the schema browser; otherwise to the picker.
+		if a.dataViewer.Table() != nil {
+			a.screen = ScreenDataViewer
+		} else if a.cache.Get() != nil {
+			a.screen = ScreenSchemaBrowser
+		} else {
+			a.screen = ScreenConnPicker
+		}
+
+	case tui.SqlExecuteMsg:
+		// Filter-on-JOIN: when the user is viewing a JOIN result and types
+		// only a WHERE / ORDER BY / GROUP BY / HAVING / LIMIT clause, treat
+		// the input as a filter to append to the active JOIN SQL instead
+		// of running it as a fresh query. A full SELECT (or any other DML)
+		// still replaces. The wizard always emits clean SELECT JOINs with
+		// no trailing clauses, so direct concatenation is safe.
+		sql := msg.SQL
+		joinFiltered := false
+		if len(a.joinChain) >= 2 && a.lastSQL != "" && isFilterClause(sql) {
+			sql = strings.TrimSpace(a.lastSQL) + " " + strings.TrimSpace(sql)
+			joinFiltered = true
+		}
+		a.lastSQL = sql
+		cmds = append(cmds, a.execSQLCmd(sql))
+		a.screen = ScreenDataViewer
+		if joinFiltered {
+			cmds = append(cmds, a.statusBar.SetMsg("filter applied to JOIN result"))
+		}
 
 	case tui.JoinExecMsg:
 		a.modal = ModalNone
@@ -950,6 +1033,10 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 		var cmd tea.Cmd
 		a.welcome, cmd = a.welcome.Update(msg)
 		cmds = append(cmds, cmd)
+	case ScreenSQLEditor:
+		var cmd tea.Cmd
+		a.sqlEditor, cmd = a.sqlEditor.Update(msg)
+		cmds = append(cmds, cmd)
 	case ScreenConnPicker:
 		var cmd tea.Cmd
 		a.connPicker, cmd = a.connPicker.Update(msg)
@@ -993,10 +1080,21 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 			case "D":
 				cmds = append(cmds, a.discardStagedCmd())
 			case ":":
+				a.refreshSqlBarPlaceholder()
 				cmds = append(cmds, a.sqlBar.Focus())
+			case "ctrl+e":
+				a.openSQLEditor()
 			case "V":
 				a.viewsList = tui.NewViewsListModel(a.loadViewItems(), a.width, a.height)
 				a.modal = ModalViewsList
+			case "ctrl+right":
+				if len(a.tabs) > 1 {
+					a.activateTab((a.activeTab + 1) % len(a.tabs))
+				}
+			case "ctrl+left":
+				if len(a.tabs) > 1 {
+					a.activateTab((a.activeTab - 1 + len(a.tabs)) % len(a.tabs))
+				}
 			}
 		}
 	case ScreenDataViewer:
@@ -1034,7 +1132,10 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 			case "D": // discard all staged changes
 				cmds = append(cmds, a.discardStagedCmd())
 			case ":": // focus the inline SQL bar
+				a.refreshSqlBarPlaceholder()
 				cmds = append(cmds, a.sqlBar.Focus())
+			case "ctrl+e": // open the full-screen SQL editor
+				a.openSQLEditor()
 			case "ctrl+a", "f2": // open AI ask panel
 				a.screen = ScreenAskPanel
 				a.askPanel = tui.NewAskPanelModel(a.ai.Enabled(), a.width, a.height)
@@ -1120,7 +1221,7 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 			case "esc":
 				// First Esc clears any active row marks so the user doesn't
 				// jump screens by accident with a selection live. Second Esc
-				// (or Esc with no marks) goes back to the schema browser.
+				// (or Esc with no marks) goes back to the Schema tab.
 				if a.dataViewer.HasMarks() {
 					a.dataViewer.ClearMarks()
 				} else {
@@ -1128,7 +1229,23 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 						cancel()
 						delete(a.inflight, id)
 					}
-					a.screen = ScreenSchemaBrowser
+					a.saveActiveDataTab()
+					a.activateTab(0) // Schema tab
+				}
+			case "ctrl+w": // close active data tab
+				idx := a.activeTab
+				if idx > 0 {
+					a.closeTab(idx)
+				}
+			case "ctrl+right":
+				a.saveActiveDataTab()
+				if len(a.tabs) > 1 {
+					a.activateTab((a.activeTab + 1) % len(a.tabs))
+				}
+			case "ctrl+left":
+				a.saveActiveDataTab()
+				if len(a.tabs) > 1 {
+					a.activateTab((a.activeTab - 1 + len(a.tabs)) % len(a.tabs))
 				}
 			}
 		}
@@ -1165,7 +1282,7 @@ func (a *App) View() string {
 			spinnerLine,
 		)
 	}
-	helpLine := tui.RenderHelpBar(a.helpContext(), a.width, a.ai.Enabled())
+	helpLine := tui.RenderHelpBar(a.helpContext(), a.width, a.helpState())
 
 	chromeBeneath := lipgloss.Height(helpLine) + lipgloss.Height(statusLine)
 	bodyHeight := a.height - chromeBeneath
@@ -1185,7 +1302,12 @@ func (a *App) View() string {
 	if a.screen == ScreenDataViewer || a.screen == ScreenSchemaBrowser {
 		sqlBarLines = a.sqlBar.Height()
 	}
-	innerHeight := bodyHeight - stagedBannerLines - sqlBarLines
+	tabBarLine := a.renderTabBar()
+	tabBarLines := 0
+	if tabBarLine != "" && (a.screen == ScreenDataViewer || a.screen == ScreenSchemaBrowser) {
+		tabBarLines = 1
+	}
+	innerHeight := bodyHeight - stagedBannerLines - sqlBarLines - tabBarLines
 	a.dataViewer.SetWidth(a.width)
 	a.dataViewer.SetHeight(innerHeight)
 	a.applyJoinLegend()
@@ -1197,12 +1319,22 @@ func (a *App) View() string {
 	switch a.screen {
 	case ScreenWelcome:
 		body = lipgloss.Place(a.width, bodyHeight, lipgloss.Center, lipgloss.Center, a.welcome.View())
+	case ScreenSQLEditor:
+		body = a.sqlEditor.View()
 	case ScreenConnPicker:
 		body = a.connPicker.View()
 	case ScreenSchemaBrowser:
-		body = a.prependStagedBanner(a.schemaBrow.View()) + "\n" + a.sqlBar.View()
+		body = a.schemaBrow.View() + "\n" + a.sqlBar.View()
+		if tabBarLines > 0 {
+			body = tabBarLine + "\n" + body
+		}
+		body = a.prependStagedBanner(body)
 	case ScreenDataViewer:
-		body = a.prependStagedBanner(a.dataViewer.View()) + "\n" + a.sqlBar.View()
+		body = a.dataViewer.View() + "\n" + a.sqlBar.View()
+		if tabBarLines > 0 {
+			body = tabBarLine + "\n" + body
+		}
+		body = a.prependStagedBanner(body)
 	case ScreenAskPanel:
 		body = a.askPanel.View()
 	}
@@ -1282,6 +1414,33 @@ func (a *App) prependStagedBanner(body string) string {
 	return banner + "\n" + body
 }
 
+// helpState assembles the dynamic context the help bar consumes — what's
+// staged, marked, whether the cursor sits at the buffer boundary with more
+// rows behind it, etc. The helpbar package uses this to hide irrelevant
+// keys and fold counts into descriptions, which keeps the bar narrow
+// enough to survive truncation on small terminals.
+func (a *App) helpState() tui.HelpState {
+	state := tui.HelpState{
+		AIEnabled:   a.ai.Enabled(),
+		StagedCount: len(a.edit.Changes()),
+		MarkCount:   a.dataViewer.MarkCount(),
+	}
+	if row, col, ok := a.dataViewer.SelectedCell(); ok {
+		state.HasResultSet = true
+		state.SelectedCol = col
+		loaded := a.dataViewer.LoadedRowCount()
+		if loaded > 0 {
+			state.AtLastLoadedRow = (row == loaded-1)
+		}
+		if total := a.dataViewer.TotalRows(); total > 0 {
+			state.MoreRowsAvailable = (a.dbOffset + loaded) < total
+		}
+	}
+	state.HasJoinChain = len(a.joinChain) >= 2
+	state.TabCount = len(a.tabs)
+	return state
+}
+
 // helpContext maps the current screen/modal state to a tui.HelpContext.
 // The modal takes priority over the SQL bar, which takes priority over the
 // active screen.
@@ -1322,6 +1481,8 @@ func (a *App) helpContext() tui.HelpContext {
 		return tui.HelpContextAskPanel
 	case ScreenWelcome:
 		return tui.HelpContextWelcome
+	case ScreenSQLEditor:
+		return tui.HelpContextSQLEditor
 	}
 	return tui.HelpContextConnPicker
 }
@@ -1620,6 +1781,7 @@ func (a *App) refreshSqlBarSchema() {
 		}
 	}
 	a.sqlBar.SetSchema(tables, cols)
+	a.sqlEditor.SetSchema(tables, cols)
 }
 
 // refreshCurrentTable re-queries the table currently shown in the data viewer.
@@ -1743,6 +1905,80 @@ func (a *App) copyRowsTSV() (string, int) {
 		sb.WriteByte('\n')
 	}
 	return sb.String(), len(rows)
+}
+
+// renderTabBar produces the single-line tab strip rendered above the
+// schema browser / data viewer body. Returns "" when no tabs exist
+// (e.g. before the first connection). Active tab gets a brighter
+// highlight; the schema tab keeps a fixed leftmost position.
+func (a *App) renderTabBar() string {
+	if len(a.tabs) == 0 {
+		return ""
+	}
+	activeStyle := lipgloss.NewStyle().
+		Foreground(tui.CtpBase).
+		Background(tui.CtpMauve).
+		Padding(0, 1).
+		Bold(true)
+	idleStyle := lipgloss.NewStyle().
+		Foreground(tui.CtpSubtext1).
+		Padding(0, 1)
+	parts := make([]string, 0, len(a.tabs))
+	for i, t := range a.tabs {
+		title := t.Title
+		if t.Kind == TabSchema {
+			title = "Schema"
+		}
+		if i == a.activeTab {
+			parts = append(parts, activeStyle.Render(title))
+		} else {
+			parts = append(parts, idleStyle.Render(title))
+		}
+	}
+	bar := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+	if a.width > 0 {
+		bar = lipgloss.NewStyle().MaxWidth(a.width).Render(bar)
+	}
+	return bar
+}
+
+// openSQLEditor switches into the full-screen SQL editor, pre-filling it
+// with the last-run SQL so the user can iterate on a prior query without
+// retyping. Initializes the model fresh each time so the textarea picks
+// up the current terminal size.
+func (a *App) openSQLEditor() {
+	a.sqlEditor = tui.NewSQLEditorModel(a.width, a.height)
+	a.refreshSqlBarSchema() // also feeds the editor's autocomplete pools
+	if a.lastSQL != "" {
+		a.sqlEditor.SetValue(a.lastSQL)
+	}
+	a.screen = ScreenSQLEditor
+}
+
+// isFilterClause reports whether the input looks like a SQL clause that
+// should be appended to an existing query (a filter) rather than run as
+// a standalone statement. Recognized starts: WHERE, ORDER BY, GROUP BY,
+// HAVING, LIMIT — case- and whitespace-insensitive.
+func isFilterClause(sql string) bool {
+	up := strings.ToUpper(strings.TrimSpace(sql))
+	for _, kw := range []string{"WHERE ", "ORDER BY ", "GROUP BY ", "HAVING ", "LIMIT "} {
+		if strings.HasPrefix(up, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshSqlBarPlaceholder sets the SQL bar's placeholder hint based on
+// whether a JOIN chain is currently materialized. In JOIN view, the bar
+// can either filter the active result (clause input) or replace it with
+// a fresh query — the placeholder advertises that branching behavior.
+func (a *App) refreshSqlBarPlaceholder() {
+	if len(a.joinChain) >= 2 && a.lastSQL != "" {
+		a.sqlBar.SetPlaceholder("WHERE/ORDER BY/… filters the JOIN · full SELECT replaces it")
+	} else {
+		a.sqlBar.SetPlaceholder("press : to enter SQL · Enter run · Esc unfocus")
+	}
 }
 
 // editTestConnResultMsg carries the outcome of an edit-connection test back

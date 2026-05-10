@@ -10,9 +10,12 @@ import (
 	"github.com/gabiito/zdb/internal/db"
 )
 
-// OpenTableMsg is emitted when the user selects a table to view.
+// OpenTableMsg is emitted when the user selects a table to view. NewTab
+// is set to true when the user explicitly requested a fresh data tab
+// (Ctrl+Enter) instead of reusing the active data tab.
 type OpenTableMsg struct {
-	Table *db.Table
+	Table  *db.Table
+	NewTab bool
 }
 
 // tableListItem wraps a TableSummary for the bubbles/list widget.
@@ -64,8 +67,8 @@ func NewSchemaBrowserModel(
 	leftWidth := width / 3
 	delegate := list.NewDefaultDelegate()
 	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
-		Foreground(lipgloss.Color("205")).
-		BorderForeground(lipgloss.Color("205"))
+		Foreground(CtpPink).
+		BorderForeground(CtpPink)
 
 	l := list.New(items, delegate, leftWidth, height-4)
 	l.Title = "Tables"
@@ -128,15 +131,21 @@ func (m SchemaBrowserModel) Init() tea.Cmd { return nil }
 func (m SchemaBrowserModel) Update(msg tea.Msg) (SchemaBrowserModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if msg.String() == "enter" {
+		key := msg.String()
+		// "ctrl+enter" only fires on terminals with the Kitty keyboard
+		// protocol (kitty, wezterm, modern alacritty); everywhere else
+		// Enter and Ctrl+Enter share the same byte. "ctrl+t" is the
+		// portable fallback for "open in a new tab".
+		if key == "enter" || key == "ctrl+enter" || key == "ctrl+t" {
 			if item, ok := m.tableList.SelectedItem().(tableListItem); ok {
 				qualName := item.summary.Name
 				if item.summary.Schema != "" {
 					qualName = item.summary.Schema + "." + item.summary.Name
 				}
 				if tbl := m.cache.Table(qualName); tbl != nil {
+					newTab := key == "ctrl+enter" || key == "ctrl+t"
 					return m, func() tea.Msg {
-						return OpenTableMsg{Table: tbl}
+						return OpenTableMsg{Table: tbl, NewTab: newTab}
 					}
 				}
 			}

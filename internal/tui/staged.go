@@ -87,7 +87,7 @@ func (m StagedViewModel) View() string {
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("214")).
+		BorderForeground(CtpPeach).
 		Padding(1, 2).
 		Width(boxW).
 		Render(

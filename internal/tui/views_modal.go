@@ -64,8 +64,8 @@ func NewViewsListModel(items []ViewItem, width, height int) ViewsListModel {
 	}
 
 	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(lipgloss.Color("171"))
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(lipgloss.Color("171"))
+	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(CtpMauve)
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(CtpMauve)
 
 	l := list.New(listItems, delegate, boxW-4, boxH-6)
 	l.Title = "Saved views"
@@ -117,7 +117,7 @@ func (m ViewsListModel) View() string {
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("171")).
+		BorderForeground(CtpMauve).
 		Padding(1, 2).
 		Width(boxW).
 		Render(
@@ -194,7 +194,7 @@ func (m SaveViewModel) View() string {
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("171")).
+		BorderForeground(CtpMauve).
 		Padding(1, 2).
 		Width(boxW).
 		Render(

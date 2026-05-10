@@ -60,15 +60,15 @@ func (m JoinChoiceModel) View() string {
 
 	body := StyleTitle.Render("Continue join?") + "\n\n" +
 		StyleDim.Render("Currently joined: ") + chain + "\n\n" +
-		"  " + lipgloss.NewStyle().Foreground(lipgloss.Color("114")).Bold(true).Render("A") +
+		"  " + lipgloss.NewStyle().Foreground(CtpGreen).Bold(true).Render("A") +
 		"  " + StyleDim.Render("Add another JOIN onto the chain") + "\n" +
-		"  " + lipgloss.NewStyle().Foreground(lipgloss.Color("173")).Bold(true).Render("R") +
+		"  " + lipgloss.NewStyle().Foreground(CtpPeach).Bold(true).Render("R") +
 		"  " + StyleDim.Render("Replace — start a new JOIN from scratch") + "\n" +
 		"  " + StyleDim.Render("Esc cancel")
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("33")).
+		BorderForeground(CtpBlue).
 		Padding(1, 2).
 		Width(boxW).
 		Render(body)

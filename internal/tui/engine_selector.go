@@ -65,12 +65,12 @@ func (m EngineSelectorModel) View() string {
 		switch {
 		case i == m.selected && m.focused:
 			parts[i] = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("114")).
+				Foreground(CtpGreen).
 				Bold(true).
 				Render("[ " + opt + " ]")
 		case i == m.selected:
 			parts[i] = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("250")).
+				Foreground(CtpSubtext0).
 				Render("[ " + opt + " ]")
 		default:
 			parts[i] = StyleDim.Render("  " + opt + "  ")

@@ -38,7 +38,7 @@ func NewSqlBarModel(width int) SqlBarModel {
 	ti.Placeholder = "press : to enter SQL · Enter run · Esc unfocus"
 	ti.Prompt = "› "
 	ti.PromptStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.AdaptiveColor{Light: "57", Dark: "171"}).
+		Foreground(CtpMauve).
 		Bold(true)
 	ti.PlaceholderStyle = StyleDim
 	ti.CharLimit = 4096
@@ -75,6 +75,12 @@ func (m *SqlBarModel) SetWidth(w int) {
 	m.width = w
 	m.input.Width = max(20, w-6)
 }
+
+// SetPlaceholder overrides the placeholder hint shown when the bar is empty.
+// The App calls this when context shifts (e.g., entering a JOIN view) so
+// the bar can advertise that filter clauses will be appended to the
+// active query instead of replacing it.
+func (m *SqlBarModel) SetPlaceholder(s string) { m.input.Placeholder = s }
 
 // SetSchema feeds the autocomplete pools — table names, a deduped flat list
 // of column names across all tables, plus the per-table column map used for

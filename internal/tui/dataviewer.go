@@ -186,6 +186,9 @@ func (m *DataViewerModel) SetTotalRows(total int) {
 	m.totalRows = total
 }
 
+// TotalRows returns the recorded total row count, or -1 when unknown.
+func (m DataViewerModel) TotalRows() int { return m.totalRows }
+
 // LoadedRowCount returns the number of rows currently in the buffer.
 // Used by the App to compute the offset for the next page fetch when the
 // buffer has been extended by infinite-scroll appends.
@@ -530,7 +533,7 @@ func (m DataViewerModel) View() string {
 
 	t := table.New().
 		Border(lipgloss.NormalBorder()).
-		BorderStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("240"))).
+		BorderStyle(lipgloss.NewStyle().Foreground(CtpSurface2)).
 		Headers(headers...).
 		Rows(rowsData...).
 		StyleFunc(func(row, col int) lipgloss.Style {

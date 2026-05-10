@@ -1,9 +1,8 @@
 package tui
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/lipgloss"
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/gabiito/zdb/internal/config"
 )
@@ -38,11 +37,11 @@ func NewConnPickerModel(connections []config.Connection, width, height int) Conn
 
 	delegate := list.NewDefaultDelegate()
 	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
-		Foreground(lipgloss.Color("205")).
-		BorderForeground(lipgloss.Color("205"))
+		Foreground(CtpPink).
+		BorderForeground(CtpPink)
 	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.
-		Foreground(lipgloss.Color("241")).
-		BorderForeground(lipgloss.Color("205"))
+		Foreground(CtpOverlay1).
+		BorderForeground(CtpPink)
 
 	l := list.New(items, delegate, width, height-4)
 	l.Title = "zDB — select connection"
