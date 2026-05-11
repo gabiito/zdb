@@ -63,6 +63,12 @@ type App struct {
 	statusBar    tui.StatusBarModel
 	spinner      spinner.Model
 
+	// Global shortcuts overlay (Ctrl+,). When showShortcuts is true the
+	// overlay swallows input and renders full-screen on top of whatever
+	// view was active.
+	shortcuts     tui.ShortcutsModel
+	showShortcuts bool
+
 	viewsStore *views.Store
 	configPath string // resolved at startup, used to persist new connections
 	lastSQL    string
@@ -200,6 +206,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = wsMsg.Width
 		a.height = wsMsg.Height
 		a.statusBar.SetWidth(wsMsg.Width)
+		a.shortcuts.SetSize(a.width, a.height)
 
 		// Re-initialize the active screen's sub-model when its layout depends
 		// on the terminal size.
@@ -222,6 +229,26 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cancel()
 			}
 			return a, tea.Quit
+		}
+	}
+
+	// Global: F1 toggles the shortcuts overlay. When active, the overlay
+	// receives all key input until it dismisses itself.
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "f1" {
+			a.showShortcuts = !a.showShortcuts
+			if a.showShortcuts {
+				a.shortcuts = tui.NewShortcutsModel(a.width, a.height)
+			}
+			return a, nil
+		}
+		if a.showShortcuts {
+			var close bool
+			a.shortcuts, close = a.shortcuts.Update(keyMsg)
+			if close {
+				a.showShortcuts = false
+			}
+			return a, nil
 		}
 	}
 
@@ -1473,6 +1500,11 @@ func (a *App) routeToScreen(msg tea.Msg) tea.Cmd {
 func (a *App) View() string {
 	if a.width == 0 || a.height == 0 {
 		return "Loading..."
+	}
+
+	// Shortcuts overlay short-circuits everything else.
+	if a.showShortcuts {
+		return a.shortcuts.View()
 	}
 
 	// Chrome at the bottom (always pinned): help line + status line.
