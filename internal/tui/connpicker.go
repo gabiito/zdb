@@ -3,6 +3,7 @@ package tui
 import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/gabiito/zdb/internal/config"
 )
@@ -43,11 +44,20 @@ func NewConnPickerModel(connections []config.Connection, width, height int) Conn
 		Foreground(CtpOverlay1).
 		BorderForeground(CtpPink)
 
-	l := list.New(items, delegate, width, height-4)
+	l := list.New(items, delegate, listWidthFor(width), height-4)
 	l.Title = "zDB — select connection"
 	l.Styles.Title = StyleTitle
 
 	return ConnPickerModel{list: l, width: width, height: height}
+}
+
+// listWidthFor returns the width to give the list widget, leaving room
+// for the right-hand logo panel when the terminal is wide enough.
+func listWidthFor(total int) int {
+	if total < LogoMinWidth {
+		return total
+	}
+	return total - LogoPanelWidth
 }
 
 // Selected returns the currently highlighted connection, if any. The second
@@ -79,7 +89,7 @@ func (m ConnPickerModel) Update(msg tea.Msg) (ConnPickerModel, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.list.SetSize(msg.Width, msg.Height-4)
+		m.list.SetSize(listWidthFor(msg.Width), msg.Height-4)
 	}
 
 	var cmd tea.Cmd
@@ -89,7 +99,12 @@ func (m ConnPickerModel) Update(msg tea.Msg) (ConnPickerModel, tea.Cmd) {
 
 // View implements tea.Model.
 func (m ConnPickerModel) View() string {
-	return m.list.View()
+	listView := m.list.View()
+	if m.width < LogoMinWidth {
+		return listView
+	}
+	logo := RenderLogo(LogoPanelWidth, m.height-4)
+	return lipgloss.JoinHorizontal(lipgloss.Top, listView, logo)
 }
 
 // redactDSNForDisplay shows only the host portion of a DSN.
