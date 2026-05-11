@@ -22,7 +22,7 @@ Features:
 
 ## Screenshots
 
-![zDB data viewer](docs/screenshots/table-copy.png)
+![zDB data viewer](docs/screenshots/table-copy.gif)
 
 See [docs/screenshots.md](docs/screenshots.md) for the full gallery — schema browser, staged edits, saved views, Ask AI, AI profiles, and analytics.
 
