@@ -72,3 +72,7 @@ make test-integration   # conformance tests (needs TEST_POSTGRES_DSN / TEST_MYSQ
 make lint               # go vet
 make fmt                # gofmt
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
