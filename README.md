@@ -20,6 +20,12 @@ Features:
   + estimated costs.
 - **Catppuccin** Mocha (dark) / Latte (light) palette throughout.
 
+## Screenshots
+
+![zDB data viewer](docs/screenshots/table-copy.png)
+
+See [docs/screenshots.md](docs/screenshots.md) for the full gallery — schema browser, staged edits, saved views, Ask AI, AI profiles, and analytics.
+
 ## Requirements
 
 You only need **Go ≥ 1.21** to install zDB. All Go module dependencies (Bubbletea,
