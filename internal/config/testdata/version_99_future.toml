@@ -1,0 +1,6 @@
+version = 99
+
+[[connections]]
+name   = "scratch"
+engine = "sqlite"
+dsn    = ":memory:"

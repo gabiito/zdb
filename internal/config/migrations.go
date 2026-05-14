@@ -7,27 +7,30 @@ import "fmt"
 // migrations slice whenever the on-disk schema changes.
 const CurrentSchemaVersion = 1
 
-// migration is one step in the forward-only schema lineage. Run is
+// Migration is one step in the forward-only schema lineage. Run is
 // expected to be idempotent: running it twice on the same input must
 // produce the same output as running it once. Migrations mutate m in
 // place and return an error only on truly malformed inputs.
-type migration struct {
-	toVersion int
-	run       func(m map[string]any) error
+//
+// ToVersion and Run are exported so that SetMigrationsForTest can
+// construct synthetic migrations in _test.go files without reflection.
+type Migration struct {
+	ToVersion int
+	Run       func(m map[string]any) error
 }
 
 // migrations is the ordered chain. v1 release ships empty.
 // First real migration example:
 //
-//	var migrations = []migration{
-//	    {toVersion: 2, run: migrateV1ToV2},
+//	var migrations = []Migration{
+//	    {ToVersion: 2, Run: migrateV1ToV2},
 //	}
-var migrations = []migration{}
+var migrations = []Migration{}
 
 // migrationsFn is a test seam: production code reads migrations
 // through this indirection so _test.go files can swap in a synthetic
 // chain without touching production state. Mirrors backupCurrentFn.
-var migrationsFn = func() []migration { return migrations }
+var migrationsFn = func() []Migration { return migrations }
 
 // currentSchemaVersionFn is a test seam: production code reads
 // CurrentSchemaVersion through this indirection so _test.go files
@@ -38,9 +41,9 @@ var currentSchemaVersionFn = func() int { return CurrentSchemaVersion }
 // SetMigrationsForTest replaces the live registry for the duration of a
 // test and returns a restore function. Call defer restore() in the test.
 // Mirrors SetBackupCurrentForTest.
-func SetMigrationsForTest(fake []migration) (restore func()) {
+func SetMigrationsForTest(fake []Migration) (restore func()) {
 	prev := migrationsFn
-	migrationsFn = func() []migration { return fake }
+	migrationsFn = func() []Migration { return fake }
 	return func() { migrationsFn = prev }
 }
 
@@ -84,22 +87,22 @@ func runMigrations(rawMap map[string]any, fileVersion int) (int, error) {
 	cursor := fileVersion
 	target := currentSchemaVersionFn()
 	for _, m := range migrationsFn() {
-		if m.toVersion <= cursor {
+		if m.ToVersion <= cursor {
 			continue
 		}
-		if m.toVersion > target {
+		if m.ToVersion > target {
 			// Defensive: the registry is malformed — a maintainer appended a
 			// future migration without bumping the constant. Refuse rather than
 			// half-migrate.
 			return cursor, fmt.Errorf(
 				"zdb: migration chain inconsistent: migration to v%d exceeds CurrentSchemaVersion %d",
-				m.toVersion, target,
+				m.ToVersion, target,
 			)
 		}
-		if err := m.run(rawMap); err != nil {
-			return cursor, fmt.Errorf("zdb: migration to v%d: %w", m.toVersion, err)
+		if err := m.Run(rawMap); err != nil {
+			return cursor, fmt.Errorf("zdb: migration to v%d: %w", m.ToVersion, err)
 		}
-		cursor = m.toVersion
+		cursor = m.ToVersion
 		rawMap["version"] = int64(cursor)
 	}
 	return cursor, nil
