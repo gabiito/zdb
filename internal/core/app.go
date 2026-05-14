@@ -25,8 +25,9 @@ import (
 
 // App is the Bubbletea root model for zDB.
 type App struct {
-	cfg  config.Config
-	log  *slog.Logger
+	cfg      config.Config
+	snapshot config.Snapshot // load-time fingerprint; updated on every successful save
+	log      *slog.Logger
 	drv  db.Driver
 	ai   ai.AIProvider
 	edit *EditBuffer
@@ -143,8 +144,11 @@ type App struct {
 	width, height int
 }
 
-// NewApp creates a new App from config.
-func NewApp(cfg config.Config, log *slog.Logger) *App {
+// NewApp creates a new App from a loaded config.
+// The LoadedConfig carries both the parsed Config and the load-time snapshot;
+// the snapshot is threaded through saves to detect external modifications.
+func NewApp(loaded config.LoadedConfig, log *slog.Logger) *App {
+	cfg := loaded.Config
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 
@@ -176,6 +180,7 @@ func NewApp(cfg config.Config, log *slog.Logger) *App {
 
 	return &App{
 		cfg:         cfg,
+		snapshot:    loaded.Snapshot,
 		log:         log,
 		ai:          provider,
 		edit:        &EditBuffer{},
@@ -355,7 +360,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Modal closes on success; backup-skip annotation would not be
 		// visible to the user — using Save() wrapper intentionally.
-		// (REQ-26 carve-out, AC-9). Snapshot threading is Slice 5 (PR 2).
+		// (REQ-6.4 carve-out: zero Snapshot skips external-mod check; design §5.3)
 		if err := config.Save(a.cfg, a.configPath); err != nil {
 			a.aiSetup.SetError(fmt.Sprintf("save config: %v", err))
 			break
@@ -2561,19 +2566,30 @@ func (a *App) askAICmd(question string) tea.Cmd {
 // when the .bak refresh failed. On a hard write failure it surfaces the error
 // via SetErr. successMsg must be non-empty.
 //
+// When the config file was modified externally since load, the write is aborted
+// and the status bar shows a reconcile hint pointing the user to
+// `zdb config import` or a restart. The user's in-memory state is NOT discarded.
+//
 // Do not generalize this helper — it is intentionally scoped to the single
 // concern of config-save + status-bar feedback (R7 mitigation).
 func (a *App) saveConfigAnnotated(successMsg string) tea.Cmd {
 	if a.configPath == "" {
 		return a.statusBar.SetErr(fmt.Errorf("[config] no path resolved"))
 	}
-	// Snapshot threading (a.snapshot → newSnap) is wired in Slice 5 (PR 2).
-	// For now we pass a zero-value snapshot; the external-mod check is a no-op
-	// until Slice 2 implements it.
-	_, backupErr, writeErr := config.SaveWithBackupStatus(a.cfg, a.configPath, config.Snapshot{})
+	newSnap, backupErr, writeErr := config.SaveWithBackupStatus(a.cfg, a.configPath, a.snapshot)
+	if errors.Is(writeErr, config.ErrConfigChangedExternally) {
+		// File was modified externally since load. Surface the reconcile hint.
+		// The user's in-memory state is preserved; they can restart zdb or run
+		// `zdb config import` to reconcile.
+		return a.statusBar.SetErr(fmt.Errorf(
+			"[config] file changed externally — close and reopen zdb, or run `zdb config import` to reconcile",
+		))
+	}
 	if writeErr != nil {
 		return a.statusBar.SetErr(fmt.Errorf("[config] save: %v", writeErr))
 	}
+	// Refresh the snapshot so subsequent saves do not trigger a false stale error.
+	a.snapshot = newSnap
 	if errors.Is(backupErr, config.ErrBackupSkipped) {
 		return a.statusBar.SetMsg(successMsg + " (backup skipped)")
 	}

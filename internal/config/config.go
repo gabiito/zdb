@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,6 +170,17 @@ func (e *ErrFutureVersion) Is(target error) bool {
 // " (backup skipped)" — append it to the existing success message.
 var ErrBackupSkipped = errors.New("zdb: backup snapshot was not refreshed")
 
+// ErrConfigChangedExternally is returned by SaveWithBackupStatus (as writeErr)
+// when the config file on disk has been modified externally since the last Load.
+// The write is aborted and the on-disk file is left unchanged.
+//
+// Recovery options:
+//   - Set ZDB_SKIP_STALE_CHECK=1 to opt out of the check entirely (useful when
+//     storing config in a synced folder such as Dropbox that touches mtime).
+//   - Run `zdb config import <path>` to reconcile the external change.
+//   - Restart zdb; the fresh load captures the new mtime/size as the baseline.
+var ErrConfigChangedExternally = errors.New("zdb: config file was modified externally since load")
+
 // backupCurrentFn is a test seam: package tests can replace this variable to
 // inject backup failures deterministically. Production code always points at
 // backupCurrent.
@@ -184,19 +196,47 @@ func SetBackupCurrentForTest(fn func(string) error) (restore func()) {
 }
 
 // saveCore is the shared inner implementation for SaveWithBackupStatus and
-// SaveWithBackupStatusForce. It handles directory creation, backup, atomic
-// write, and snapshot capture. The skipCheck parameter controls whether the
-// external-modification check (Slice 2) is applied; for now it is always
-// skipped (stub). Returns (newSnap, backupErr, writeErr).
+// SaveWithBackupStatusForce. It handles directory creation, the external-mod
+// check, backup, atomic write, and snapshot capture.
+//
+// skipCheck == true bypasses the external-modification check entirely.
+// This is used by SaveWithBackupStatusForce and Save (the unconditional paths).
+//
+// External-modification check (when skipCheck == false):
+// If snap.Path is non-empty and matches path, the file is stat-ed. If its
+// mtime/size differ from the snapshot, the write is aborted with
+// ErrConfigChangedExternally. Set ZDB_SKIP_STALE_CHECK=1 to opt out.
+// If the file was deleted externally (ErrNotExist), the check is skipped and
+// the save proceeds (treat as first-save).
+//
+// Returns (newSnap, backupErr, writeErr).
 func saveCore(cfg Config, path string, snap Snapshot, skipCheck bool) (Snapshot, error, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return Snapshot{}, nil, err
 	}
 
-	// Snapshot check stub — Slice 2 (PR 2) will implement the real check.
-	// For now this is a no-op regardless of skipCheck.
-	_ = skipCheck
-	_ = snap
+	// External-modification check.
+	if !skipCheck && snap.Path != "" && snap.Path == path {
+		fi, err := os.Stat(path)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// File was deleted between Load and Save. Treat as first-save and
+			// proceed; the user's intent is to recreate the file.
+		case err != nil:
+			return Snapshot{}, nil, fmt.Errorf("zdb: stat config before save: %w", err)
+		default:
+			currentMTime := fi.ModTime().UnixNano()
+			currentSize := fi.Size()
+			if currentMTime != snap.MTime || currentSize != snap.Size {
+				// ZDB_SKIP_STALE_CHECK=1 opts out of the check. Useful when
+				// storing config in a synced folder (Dropbox, etc.) that
+				// touches mtime even when content is unchanged.
+				if os.Getenv("ZDB_SKIP_STALE_CHECK") != "1" {
+					return Snapshot{}, nil, ErrConfigChangedExternally
+				}
+			}
+		}
+	}
 
 	var backupErr error
 	if err := backupCurrentFn(path); err != nil {

@@ -94,10 +94,8 @@ func runTUI() {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
-	// Snapshot threading to core.NewApp is Slice 5 (PR 2).
-	cfg := loaded.Config
 
-	app := core.NewApp(cfg, log)
+	app := core.NewApp(loaded, log)
 
 	p := tea.NewProgram(app, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
