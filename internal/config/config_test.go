@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gabiito/zdb/internal/config"
 )
@@ -476,5 +477,251 @@ func TestAtomicWriteNoTempfileLeakedOnSuccess(t *testing.T) {
 		if strings.HasSuffix(e.Name(), ".tmp") {
 			t.Errorf("leftover tempfile after successful Save: %s", e.Name())
 		}
+	}
+}
+
+// ---- Slice 2: external-modification detection tests ----
+
+// minimalCfg returns a minimal valid Config for use in save tests.
+func minimalCfg() config.Config {
+	return config.Config{
+		Connections: []config.Connection{
+			{Name: "dev", Engine: "sqlite", DSN: ":memory:"},
+		},
+	}
+}
+
+// writeAndLoad writes cfg to path and loads it back, returning the snapshot.
+func writeAndLoad(t *testing.T, cfg config.Config, path string) config.Snapshot {
+	t.Helper()
+	if err := config.Save(cfg, path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	t.Setenv("ZDB_CONFIG", path)
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return loaded.Snapshot
+}
+
+// TestSave_StaleSnapshotRefused verifies that SaveWithBackupStatus returns
+// ErrConfigChangedExternally when the file has been modified externally since
+// load (SCEN-8, REQ-6.2, REQ-6.3).
+func TestSave_StaleSnapshotRefused(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := minimalCfg()
+	snap := writeAndLoad(t, cfg, path)
+
+	// Bump mtime externally (advance by 5 seconds).
+	future := snap.MTime/1e9 + 5
+	futureTime := time.Unix(future, 0)
+	if err := os.Chtimes(path, futureTime, futureTime); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	// Record the externally-bumped content.
+	contentBefore, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile before save: %v", err)
+	}
+
+	_, _, writeErr := config.SaveWithBackupStatus(cfg, path, snap)
+	if !errors.Is(writeErr, config.ErrConfigChangedExternally) {
+		t.Fatalf("writeErr = %v; want ErrConfigChangedExternally", writeErr)
+	}
+
+	// File on disk must be unchanged.
+	contentAfter, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile after aborted save: %v", err)
+	}
+	if string(contentBefore) != string(contentAfter) {
+		t.Errorf("file content changed despite aborted save")
+	}
+
+	// No .bak must have been created by the aborted save.
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("unexpected .bak file after aborted save; err = %v", err)
+	}
+}
+
+// TestSave_FreshSnapshotSucceeds verifies that a load followed immediately by
+// save succeeds, and that the returned new snapshot lets a second save also
+// succeed (SCEN-10, REQ-7.1, REQ-7.2).
+func TestSave_FreshSnapshotSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := minimalCfg()
+	snap := writeAndLoad(t, cfg, path)
+
+	// First save with the load-time snapshot must succeed.
+	newSnap, _, writeErr := config.SaveWithBackupStatus(cfg, path, snap)
+	if writeErr != nil {
+		t.Fatalf("first SaveWithBackupStatus: %v", writeErr)
+	}
+	if newSnap.Path != path {
+		t.Errorf("newSnap.Path = %q; want %q", newSnap.Path, path)
+	}
+	if newSnap.MTime == 0 {
+		t.Error("newSnap.MTime is zero after successful save")
+	}
+
+	// Second save with the refreshed snapshot must also succeed.
+	_, _, writeErr2 := config.SaveWithBackupStatus(cfg, path, newSnap)
+	if writeErr2 != nil {
+		t.Errorf("second SaveWithBackupStatus: %v", writeErr2)
+	}
+}
+
+// TestSaveForce_BypassesStaleCheck verifies that SaveWithBackupStatusForce
+// succeeds even when the file has been modified externally (SCEN-9, REQ-8.1, REQ-8.2).
+func TestSaveForce_BypassesStaleCheck(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := minimalCfg()
+	snap := writeAndLoad(t, cfg, path)
+
+	// Bump mtime externally.
+	future := snap.MTime/1e9 + 5
+	futureTime := time.Unix(future, 0)
+	if err := os.Chtimes(path, futureTime, futureTime); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	newSnap, _, writeErr := config.SaveWithBackupStatusForce(cfg, path)
+	if writeErr != nil {
+		t.Fatalf("SaveWithBackupStatusForce: %v", writeErr)
+	}
+
+	// Returned snapshot must reflect the just-written file (REQ-8.3).
+	if newSnap.Path != path {
+		t.Errorf("newSnap.Path = %q; want %q", newSnap.Path, path)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat after force-save: %v", err)
+	}
+	if newSnap.MTime != fi.ModTime().UnixNano() {
+		t.Errorf("newSnap.MTime %d != file mtime %d", newSnap.MTime, fi.ModTime().UnixNano())
+	}
+}
+
+// TestSave_ExternalDeleteDoesNotError verifies that if the file is deleted
+// between Load and Save, the save proceeds normally (REQ-6.5).
+func TestSave_ExternalDeleteDoesNotError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := minimalCfg()
+	snap := writeAndLoad(t, cfg, path)
+
+	// Delete the file externally.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	_, _, writeErr := config.SaveWithBackupStatus(cfg, path, snap)
+	if writeErr != nil {
+		t.Fatalf("SaveWithBackupStatus after external delete: %v", writeErr)
+	}
+
+	// The file must now exist (recreated by the save).
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("file not recreated after save: %v", err)
+	}
+}
+
+// TestSave_DifferentPathSkipsCheck verifies that when the snapshot's path
+// differs from the save path, the stale check is skipped (REQ-6.6).
+func TestSave_DifferentPathSkipsCheck(t *testing.T) {
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "a.toml")
+	pathB := filepath.Join(dir, "b.toml")
+
+	cfg := minimalCfg()
+	snap := writeAndLoad(t, cfg, pathA)
+	// snap.Path == pathA; we save to pathB — check must be skipped.
+
+	_, _, writeErr := config.SaveWithBackupStatus(cfg, pathB, snap)
+	if writeErr != nil {
+		t.Fatalf("SaveWithBackupStatus to different path: %v", writeErr)
+	}
+}
+
+// TestSave_ZDB_SKIP_STALE_CHECK_EnvBypass verifies that setting
+// ZDB_SKIP_STALE_CHECK=1 allows a save even when the file is stale (REQ design §4.6).
+func TestSave_ZDB_SKIP_STALE_CHECK_EnvBypass(t *testing.T) {
+	t.Setenv("ZDB_SKIP_STALE_CHECK", "1")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := minimalCfg()
+	snap := writeAndLoad(t, cfg, path)
+
+	// Bump mtime to make it stale.
+	future := snap.MTime/1e9 + 5
+	futureTime := time.Unix(future, 0)
+	if err := os.Chtimes(path, futureTime, futureTime); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	_, _, writeErr := config.SaveWithBackupStatus(cfg, path, snap)
+	if writeErr != nil {
+		t.Fatalf("SaveWithBackupStatus with opt-out env: %v", writeErr)
+	}
+}
+
+// TestSave_ZeroSnapSkipsCheck verifies that a zero-value Snapshot (Path == "")
+// causes the stale check to be skipped — first-save behaviour (REQ-6.4).
+func TestSave_ZeroSnapSkipsCheck(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := minimalCfg()
+	// Zero-value snapshot: no file was loaded, so no check should run.
+	_, _, writeErr := config.SaveWithBackupStatus(cfg, path, config.Snapshot{})
+	if writeErr != nil {
+		t.Fatalf("SaveWithBackupStatus with zero snap: %v", writeErr)
+	}
+}
+
+// TestSnapshotThreading verifies load→save→save threading prevents false
+// positives, and that a third save after external mutation returns
+// ErrConfigChangedExternally (design §8.4).
+func TestSnapshotThreading(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := minimalCfg()
+	snap := writeAndLoad(t, cfg, path)
+
+	// First save: should succeed and return a fresh snapshot.
+	snap2, _, err1 := config.SaveWithBackupStatus(cfg, path, snap)
+	if err1 != nil {
+		t.Fatalf("first save: %v", err1)
+	}
+
+	// Second save with the refreshed snapshot: should also succeed.
+	snap3, _, err2 := config.SaveWithBackupStatus(cfg, path, snap2)
+	if err2 != nil {
+		t.Fatalf("second save: %v", err2)
+	}
+
+	// Mutate the file externally.
+	future := snap3.MTime/1e9 + 5
+	if err := os.Chtimes(path, time.Unix(future, 0), time.Unix(future, 0)); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	// Third save with snap3 must now detect the external change.
+	_, _, err3 := config.SaveWithBackupStatus(cfg, path, snap3)
+	if !errors.Is(err3, config.ErrConfigChangedExternally) {
+		t.Errorf("third save: want ErrConfigChangedExternally, got %v", err3)
 	}
 }
