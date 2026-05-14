@@ -1,0 +1,9 @@
+[[connections]]
+name   = "Prod"
+engine = "sqlite"
+dsn    = "/tmp/a.db"
+
+[[connections]]
+name   = "prod"
+engine = "sqlite"
+dsn    = "/tmp/b.db"
