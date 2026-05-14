@@ -5,6 +5,10 @@ import (
 	"strings"
 )
 
+// NOTE: internal/config/config.go contains a private copy of this algorithm
+// (slugNormalise) to avoid the config → views import cycle. The two MUST
+// stay in sync — if you change the rules here, update slugNormalise too.
+
 // slugSubstRe matches any run of characters that are not lowercase ASCII
 // alphanumerics, dots, underscores, or hyphens.
 var slugSubstRe = regexp.MustCompile(`[^a-z0-9._-]+`)
