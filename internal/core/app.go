@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -352,6 +353,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.aiSetup.SetError("no config path resolved — cannot persist AI settings")
 			break
 		}
+		// Modal closes on success; backup-skip annotation would not be
+		// visible to the user — using Save() wrapper intentionally.
+		// (REQ-26 carve-out, AC-9)
 		if err := config.Save(a.cfg, a.configPath); err != nil {
 			a.aiSetup.SetError(fmt.Sprintf("save config: %v", err))
 			break
@@ -824,10 +828,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.cfg.Connections = append(a.cfg.Connections, toSave)
 				if a.configPath == "" {
 					cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] no path resolved — connection added in-memory only")))
-				} else if err := config.Save(a.cfg, a.configPath); err != nil {
-					cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err)))
 				} else {
-					cmds = append(cmds, a.statusBar.SetMsg("connection saved (asks password on connect): "+toSave.Name))
+					cmds = append(cmds, a.saveConfigAnnotated("connection saved (asks password on connect): "+toSave.Name))
 				}
 				a.modal = ModalNone
 				if a.screen == ScreenWelcome {
@@ -878,14 +880,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.cfg.Connections = append(a.cfg.Connections, toSave)
 		if a.configPath == "" {
 			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] no path resolved — connection added in-memory only")))
-		} else if err := config.Save(a.cfg, a.configPath); err != nil {
-			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err)))
 		} else {
 			suffix := ""
 			if toSave.KeyringKey != "" {
 				suffix = " (password stored in OS keyring)"
 			}
-			cmds = append(cmds, a.statusBar.SetMsg("connection saved: "+toSave.Name+suffix))
+			cmds = append(cmds, a.saveConfigAnnotated("connection saved: "+toSave.Name+suffix))
 		}
 		a.modal = ModalNone
 		// First-run flow: if we were on the welcome screen, advance to the
@@ -932,10 +932,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if a.configPath == "" {
 				cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] no path resolved — connection updated in-memory only")))
-			} else if err := config.Save(a.cfg, a.configPath); err != nil {
-				cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err)))
 			} else {
-				cmds = append(cmds, a.statusBar.SetMsg("connection updated: "+msg.Updated.Name))
+				cmds = append(cmds, a.saveConfigAnnotated("connection updated: "+msg.Updated.Name))
 			}
 			a.modal = ModalNone
 			if a.screen == ScreenConnPicker {
@@ -1004,10 +1002,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.pendingEditPasswordChanged = false
 		if a.configPath == "" {
 			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] no path resolved — connection updated in-memory only")))
-		} else if err := config.Save(a.cfg, a.configPath); err != nil {
-			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err)))
 		} else {
-			cmds = append(cmds, a.statusBar.SetMsg("connection updated: "+toSave.Name))
+			cmds = append(cmds, a.saveConfigAnnotated("connection updated: "+toSave.Name))
 		}
 		a.modal = ModalNone
 		if a.screen == ScreenConnPicker {
@@ -1091,13 +1087,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tui.AIProfileActivateMsg:
 		a.cfg.ActiveAI = msg.Name
-		if a.configPath != "" {
-			if err := config.Save(a.cfg, a.configPath); err != nil {
-				cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err)))
-			}
-		}
+		// Wire via helper: gates the success message on a successful write
+		// (fixes latent bug where success was appended unconditionally —
+		// REQ-28). configPath == "" is safe: helper emits a SetErr cmd.
+		cmds = append(cmds, a.saveConfigAnnotated("AI profile: "+msg.Name))
 		a.ai = ai.New(resolveAIConfig(a.cfg.ActiveProfile()))
-		cmds = append(cmds, a.statusBar.SetMsg("AI profile: "+msg.Name))
 		a.aiProfiles = tui.NewAIProfileListModel(a.cfg.AIs, a.cfg.ActiveAI, a.width, a.height)
 
 	case tui.AIProfileAddMsg:
@@ -2325,13 +2319,9 @@ func (a *App) deleteAIProfile(name string) tea.Cmd {
 			a.log.Warn("ai keyring delete failed", "key", keyringKey, "err", err)
 		}
 	}
-	if a.configPath != "" {
-		if err := config.Save(a.cfg, a.configPath); err != nil {
-			return a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err))
-		}
-	}
+	cmd := a.saveConfigAnnotated("AI profile deleted: " + name)
 	a.ai = ai.New(resolveAIConfig(a.cfg.ActiveProfile()))
-	return a.statusBar.SetMsg("AI profile deleted: " + name)
+	return cmd
 }
 
 // keyringKeyForProfile returns the OS-keyring entry path used to store
@@ -2502,11 +2492,7 @@ func (a *App) deleteConnection(name string) tea.Cmd {
 		}
 	}
 
-	if a.configPath != "" {
-		if err := config.Save(a.cfg, a.configPath); err != nil {
-			return a.statusBar.SetErr(fmt.Errorf("[config] save: %v", err))
-		}
-	}
+	cmd := a.saveConfigAnnotated("connection deleted: " + name)
 
 	if len(a.cfg.Connections) == 0 {
 		a.screen = ScreenWelcome
@@ -2514,7 +2500,7 @@ func (a *App) deleteConnection(name string) tea.Cmd {
 	} else if a.screen == ScreenConnPicker {
 		a.connPicker = tui.NewConnPickerModel(a.cfg.Connections, a.width, a.height)
 	}
-	return a.statusBar.SetMsg("connection deleted: " + name)
+	return cmd
 }
 
 // reconnectCmd attempts to reconnect the active driver.
@@ -2567,6 +2553,28 @@ func (a *App) askAICmd(question string) tea.Cmd {
 		sql, err := provider.Ask(ctx, schema, question)
 		return AIAskDoneMsg{ReqID: reqID, SQL: sql, Err: err}
 	}
+}
+
+// saveConfigAnnotated persists a.cfg to a.configPath using the backup-aware
+// SaveWithBackupStatus API and returns a tea.Cmd that updates the status bar.
+// On a successful write it emits successMsg, suffixed with " (backup skipped)"
+// when the .bak refresh failed. On a hard write failure it surfaces the error
+// via SetErr. successMsg must be non-empty.
+//
+// Do not generalize this helper — it is intentionally scoped to the single
+// concern of config-save + status-bar feedback (R7 mitigation).
+func (a *App) saveConfigAnnotated(successMsg string) tea.Cmd {
+	if a.configPath == "" {
+		return a.statusBar.SetErr(fmt.Errorf("[config] no path resolved"))
+	}
+	backupErr, writeErr := config.SaveWithBackupStatus(a.cfg, a.configPath)
+	if writeErr != nil {
+		return a.statusBar.SetErr(fmt.Errorf("[config] save: %v", writeErr))
+	}
+	if errors.Is(backupErr, config.ErrBackupSkipped) {
+		return a.statusBar.SetMsg(successMsg + " (backup skipped)")
+	}
+	return a.statusBar.SetMsg(successMsg)
 }
 
 // pingCmd pings the active driver.
