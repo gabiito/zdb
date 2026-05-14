@@ -691,6 +691,131 @@ func TestSave_ZeroSnapSkipsCheck(t *testing.T) {
 	}
 }
 
+// ---- Slug collision helpers (per-connection-views Slice 1) ----
+
+// slugFn is the slug normalisation function used in tests. It mirrors
+// internal/views.Slug without creating an import cycle.
+func slugFn(name string) string {
+	lower := strings.ToLower(name)
+	var b strings.Builder
+	inRun := false
+	for _, r := range lower {
+		allowed := (r >= 'a' && r <= 'z') ||
+			(r >= '0' && r <= '9') ||
+			r == '.' || r == '_' || r == '-'
+		if allowed {
+			b.WriteRune(r)
+			inRun = false
+		} else {
+			if !inRun {
+				b.WriteByte('-')
+				inRun = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// TestHasConnectionSlugCollision covers the main cases for the form-submit
+// guard (REQ-4: add and rename flows).
+func TestHasConnectionSlugCollision(t *testing.T) {
+	cfg := config.Config{
+		Connections: []config.Connection{
+			{Name: "Prod DB", Engine: "sqlite", DSN: "/tmp/a.db"},
+			{Name: "staging", Engine: "sqlite", DSN: "/tmp/b.db"},
+			{Name: "dev", Engine: "sqlite", DSN: "/tmp/c.db"},
+		},
+	}
+
+	cases := []struct {
+		slug        string
+		excludeName string
+		want        bool
+		desc        string
+	}{
+		// "Prod DB" slugs to "prod-db" — passing that slug with no exclude
+		// collides with the existing "Prod DB" connection.
+		{"prod-db", "", true, "add: slug matches existing"},
+		// Same slug but excluding "Prod DB" (rename scenario — exclude self).
+		{"prod-db", "Prod DB", false, "rename: exclude self → no collision"},
+		// "Prod-DB" also slugs to "prod-db" — exclude-self for "Prod-DB" would
+		// not matter since "Prod-DB" doesn't exist; collision is with "Prod DB".
+		{"prod-db", "Prod-DB", true, "rename: different name, slug collides with existing"},
+		// Slug that doesn't exist.
+		{"nonexistent", "", false, "add: no collision"},
+		// Exclude is case-insensitive.
+		{"prod-db", "prod db", false, "rename: case-insensitive exclude"},
+		// staging's slug.
+		{"staging", "", true, "add: exact slug match"},
+		{"staging", "staging", false, "rename: exclude self"},
+	}
+
+	for _, tc := range cases {
+		got := cfg.HasConnectionSlugCollision(tc.slug, tc.excludeName)
+		if got != tc.want {
+			t.Errorf("[%s] HasConnectionSlugCollision(%q, %q) = %v, want %v",
+				tc.desc, tc.slug, tc.excludeName, got, tc.want)
+		}
+	}
+}
+
+// TestSlugCollisionsNone verifies that a config with no slug collisions returns
+// an empty slice.
+func TestSlugCollisionsNone(t *testing.T) {
+	cfg := config.Config{
+		Connections: []config.Connection{
+			{Name: "prod", Engine: "sqlite", DSN: "/tmp/a.db"},
+			{Name: "staging", Engine: "sqlite", DSN: "/tmp/b.db"},
+			{Name: "dev", Engine: "sqlite", DSN: "/tmp/c.db"},
+		},
+	}
+	cols := cfg.SlugCollisions(slugFn)
+	if len(cols) != 0 {
+		t.Errorf("expected no collisions; got %+v", cols)
+	}
+}
+
+// TestSlugCollisionsOnePair verifies a single collision pair is detected.
+func TestSlugCollisionsOnePair(t *testing.T) {
+	cfg := config.Config{
+		Connections: []config.Connection{
+			{Name: "Prod DB", Engine: "sqlite", DSN: "/tmp/a.db"},
+			{Name: "Prod-DB", Engine: "sqlite", DSN: "/tmp/b.db"},
+			{Name: "staging", Engine: "sqlite", DSN: "/tmp/c.db"},
+		},
+	}
+	cols := cfg.SlugCollisions(slugFn)
+	if len(cols) != 1 {
+		t.Fatalf("expected 1 collision, got %d: %+v", len(cols), cols)
+	}
+	c := cols[0]
+	if c.Slug != "prod-db" {
+		t.Errorf("collision slug = %q, want %q", c.Slug, "prod-db")
+	}
+	// A and B should be the two colliding names.
+	names := map[string]bool{c.A: true, c.B: true}
+	if !names["Prod DB"] || !names["Prod-DB"] {
+		t.Errorf("collision names = {%q, %q}, want {Prod DB, Prod-DB}", c.A, c.B)
+	}
+}
+
+// TestSlugCollisionsMultiPair verifies multiple collision pairs are all
+// reported.
+func TestSlugCollisionsMultiPair(t *testing.T) {
+	cfg := config.Config{
+		Connections: []config.Connection{
+			{Name: "Prod DB", Engine: "sqlite", DSN: "/tmp/a.db"},
+			{Name: "Prod-DB", Engine: "sqlite", DSN: "/tmp/b.db"},
+			{Name: "staging", Engine: "sqlite", DSN: "/tmp/c.db"},
+			{Name: "Staging!", Engine: "sqlite", DSN: "/tmp/d.db"},
+		},
+	}
+	cols := cfg.SlugCollisions(slugFn)
+	if len(cols) != 2 {
+		t.Fatalf("expected 2 collisions, got %d: %+v", len(cols), cols)
+	}
+}
+
 // TestSnapshotThreading verifies load→save→save threading prevents false
 // positives, and that a third save after external mutation returns
 // ErrConfigChangedExternally (design §8.4).
