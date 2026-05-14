@@ -1,0 +1,5 @@
+[[connections]]
+name   = "scratch"
+engine = "sqlite"
+dsn    = ":memory:"
+nme    = "typo-for-name"

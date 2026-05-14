@@ -794,6 +794,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tui.AddConnectionSubmitMsg:
 		conn := msg.Connection
 
+		if a.cfg.HasConnectionNamed(conn.Name) {
+			a.addConn.SetError("a connection with that name already exists")
+			break
+		}
+
 		// Ask-at-connect intent: empty password field on a non-sqlite engine,
 		// either with a `{password}` placeholder typed explicitly or with no
 		// password info at all in the DSN. Save without a keyring entry, skip
@@ -906,6 +911,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tui.EditConnectionSubmitMsg:
 		conn := msg.Updated
+
+		if !strings.EqualFold(conn.Name, msg.Original.Name) && a.cfg.HasConnectionNamed(conn.Name) {
+			a.editConn.SetError("a connection with that name already exists")
+			break
+		}
 
 		// Original was ask-at-connect (placeholder DSN, no keyring, no env)
 		// and the user didn't supply a new password — there's nothing to
