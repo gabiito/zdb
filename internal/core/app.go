@@ -360,7 +360,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Modal closes on success; backup-skip annotation would not be
 		// visible to the user — using Save() wrapper intentionally.
-		// (REQ-26 carve-out, AC-9). Snapshot threading is Slice 5 (PR 2).
+		// (REQ-6.4 carve-out: zero Snapshot skips external-mod check; design §5.3)
 		if err := config.Save(a.cfg, a.configPath); err != nil {
 			a.aiSetup.SetError(fmt.Sprintf("save config: %v", err))
 			break
