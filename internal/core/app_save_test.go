@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -63,11 +64,22 @@ func TestSaveConfigAnnotatedCleanSuccessNoSuffix(t *testing.T) {
 // latent bug at the AIProfileActivateMsg call site).
 func TestSaveConfigAnnotatedWriteFailureSurfacesErrorOnly(t *testing.T) {
 	// Make the target directory read-only so the write itself will fail.
-	// We use a path in a non-existent sub-directory that can't be created
-	// to force the MkdirAll / write to fail.
+	// We create a temp subdirectory, chmod it 0o444, then point configPath
+	// to a file inside it. This is portable across Linux and macOS.
+	base := t.TempDir()
+	roDir := filepath.Join(base, "ro")
+	if err := os.Mkdir(roDir, 0o755); err != nil {
+		t.Fatalf("setup: mkdir ro: %v", err)
+	}
+	if err := os.Chmod(roDir, 0o444); err != nil {
+		t.Fatalf("setup: chmod ro: %v", err)
+	}
+	// Restore write permission so t.TempDir cleanup can remove the directory.
+	t.Cleanup(func() { _ = os.Chmod(roDir, 0o755) })
+
 	a := &App{
 		cfg:        config.Config{},
-		configPath: "/proc/zdb-test-cannot-write/config.toml", // unwritable on Linux
+		configPath: filepath.Join(roDir, "config.toml"),
 		statusBar:  tui.StatusBarModel{},
 	}
 

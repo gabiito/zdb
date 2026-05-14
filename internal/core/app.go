@@ -2559,8 +2559,7 @@ func (a *App) askAICmd(question string) tea.Cmd {
 // SaveWithBackupStatus API and returns a tea.Cmd that updates the status bar.
 // On a successful write it emits successMsg, suffixed with " (backup skipped)"
 // when the .bak refresh failed. On a hard write failure it surfaces the error
-// via SetErr. A successMsg of "" suppresses the success message on the clean
-// path while still showing "(backup skipped)" when relevant.
+// via SetErr. successMsg must be non-empty.
 //
 // Do not generalize this helper — it is intentionally scoped to the single
 // concern of config-save + status-bar feedback (R7 mitigation).
@@ -2571,12 +2570,6 @@ func (a *App) saveConfigAnnotated(successMsg string) tea.Cmd {
 	backupErr, writeErr := config.SaveWithBackupStatus(a.cfg, a.configPath)
 	if writeErr != nil {
 		return a.statusBar.SetErr(fmt.Errorf("[config] save: %v", writeErr))
-	}
-	if successMsg == "" {
-		if errors.Is(backupErr, config.ErrBackupSkipped) {
-			return a.statusBar.SetMsg("config saved (backup skipped)")
-		}
-		return nil
 	}
 	if errors.Is(backupErr, config.ErrBackupSkipped) {
 		return a.statusBar.SetMsg(successMsg + " (backup skipped)")
