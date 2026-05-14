@@ -12,8 +12,31 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// Snapshot is the load-time fingerprint of the config file. Two snapshots are
+// equal if and only if MTime and Size match exactly. A zero-value Snapshot
+// (Path == "") signals "no prior file" and causes the external-modification
+// check to be skipped.
+type Snapshot struct {
+	Path  string // resolved absolute path; "" means no file was loaded
+	MTime int64  // unix nano from os.FileInfo.ModTime().UnixNano()
+	Size  int64
+}
+
+// LoadedConfig pairs a parsed Config with the snapshot taken at load time.
+// The Snapshot is consumed by Save calls to detect external modifications.
+// Hold it across the lifetime of the in-memory cfg.
+type LoadedConfig struct {
+	Config
+	Snapshot Snapshot
+}
+
 // Config is the top-level configuration structure.
 type Config struct {
+	// Version is the schema version of this config file. Set by Load() and
+	// written by Save(). DO NOT use omitempty — the version must always be
+	// serialized so that files are stamped correctly on every save.
+	Version int `toml:"version"`
+
 	Connections []Connection `toml:"connections"`
 
 	// Multi-profile AI: ActiveAI selects which entry of AIs is in use.
@@ -114,6 +137,30 @@ var validEngines = map[string]bool{
 // where one would be created.
 func ResolvePath() (string, error) { return resolvePathOrDefault() }
 
+// ErrFutureVersion is returned by Load() when the config file's version field
+// is greater than CurrentSchemaVersion. The zDB binary is too old to read this
+// file. Update zDB or restore an older config backup.
+type ErrFutureVersion struct {
+	FileVersion int
+	MaxKnown    int
+}
+
+func (e *ErrFutureVersion) Error() string {
+	return fmt.Sprintf(
+		"zdb: config version %d is newer than this zDB understands (max: %d); update zDB or restore an older config backup",
+		e.FileVersion, e.MaxKnown,
+	)
+}
+
+// Is implements errors.Is support so callers can write:
+//
+//	var target *config.ErrFutureVersion
+//	errors.As(err, &target)
+func (e *ErrFutureVersion) Is(target error) bool {
+	_, ok := target.(*ErrFutureVersion)
+	return ok
+}
+
 // ErrBackupSkipped is returned as the backupErr from SaveWithBackupStatus when
 // the .bak snapshot could not be refreshed. A nil writeErr alongside this
 // sentinel means the new config WAS persisted successfully.
@@ -136,20 +183,60 @@ func SetBackupCurrentForTest(fn func(string) error) (restore func()) {
 	return func() { backupCurrentFn = prev }
 }
 
-// SaveWithBackupStatus is identical to Save but returns the backup-step
-// outcome separately. A non-nil backupErr with a nil writeErr means the new
-// config WAS persisted but the .bak snapshot could not be refreshed.
-// Callers can check errors.Is(backupErr, ErrBackupSkipped) to distinguish a
-// fully-successful save from a save-with-backup-skipped.
-func SaveWithBackupStatus(cfg Config, path string) (backupErr error, writeErr error) {
+// saveCore is the shared inner implementation for SaveWithBackupStatus and
+// SaveWithBackupStatusForce. It handles directory creation, backup, atomic
+// write, and snapshot capture. The skipCheck parameter controls whether the
+// external-modification check (Slice 2) is applied; for now it is always
+// skipped (stub). Returns (newSnap, backupErr, writeErr).
+func saveCore(cfg Config, path string, snap Snapshot, skipCheck bool) (Snapshot, error, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
+		return Snapshot{}, nil, err
 	}
+
+	// Snapshot check stub — Slice 2 (PR 2) will implement the real check.
+	// For now this is a no-op regardless of skipCheck.
+	_ = skipCheck
+	_ = snap
+
+	var backupErr error
 	if err := backupCurrentFn(path); err != nil {
 		backupErr = fmt.Errorf("%w: %v", ErrBackupSkipped, err)
 	}
-	writeErr = atomicWriteTOML(cfg, path)
-	return backupErr, writeErr
+
+	// Stamp the current schema version before encoding.
+	cfg.Version = currentSchemaVersionFn()
+	writeErr := atomicWriteTOML(cfg, path)
+
+	// Build a fresh snapshot from the just-written file.
+	var newSnap Snapshot
+	if writeErr == nil {
+		if fi, err := os.Stat(path); err == nil {
+			newSnap = Snapshot{
+				Path:  path,
+				MTime: fi.ModTime().UnixNano(),
+				Size:  fi.Size(),
+			}
+		}
+	}
+
+	return newSnap, backupErr, writeErr
+}
+
+// SaveWithBackupStatus is identical to Save but returns the backup-step
+// outcome separately and the fresh Snapshot after a successful write.
+// A non-nil backupErr with a nil writeErr means the new config WAS persisted
+// but the .bak snapshot could not be refreshed.
+// Callers should replace their held Snapshot with newSnap on success.
+func SaveWithBackupStatus(cfg Config, path string, snap Snapshot) (newSnap Snapshot, backupErr error, writeErr error) {
+	return saveCore(cfg, path, snap, false)
+}
+
+// SaveWithBackupStatusForce performs the same atomic write and backup rotation
+// as SaveWithBackupStatus but bypasses the external-modification check. Use
+// this for the TUI's "Overwrite" reconcile path or for auto-migrate-on-load
+// write-back. Returns the fresh Snapshot of the written file.
+func SaveWithBackupStatusForce(cfg Config, path string) (newSnap Snapshot, backupErr error, writeErr error) {
+	return saveCore(cfg, path, Snapshot{}, true)
 }
 
 // Save serialises cfg back to the given path, creating the parent directory
@@ -167,7 +254,7 @@ func SaveWithBackupStatus(cfg Config, path string) (backupErr error, writeErr er
 // the glob config-*.tmp may be left in the config directory. Load() does NOT
 // remove these files automatically — remove them manually if they appear.
 func Save(cfg Config, path string) error {
-	_, err := SaveWithBackupStatus(cfg, path)
+	_, _, err := saveCore(cfg, path, Snapshot{}, true)
 	return err
 }
 
@@ -251,44 +338,93 @@ func atomicWriteTOML(cfg Config, path string) error {
 }
 
 // LoadOrEmpty loads the configuration if a file is found at any of the lookup
-// paths. When no file exists, returns an empty Config and no error — used by
-// the TUI's first-run flow to drop into the welcome screen instead of erroring.
-// Other failures (parse errors, validation errors) are still returned.
-func LoadOrEmpty() (Config, error) {
+// paths. When no file exists, returns an empty LoadedConfig and no error — used
+// by the TUI's first-run flow to drop into the welcome screen instead of
+// erroring. Other failures (parse errors, validation errors) are still
+// returned.
+func LoadOrEmpty() (LoadedConfig, error) {
 	if _, err := resolvePath(); err != nil {
 		// No file found at any lookup path — treat as empty config.
-		return Config{}, nil
+		return LoadedConfig{}, nil
 	}
 	return Load()
 }
 
 // Load reads and validates the configuration file.
 // Lookup order: $ZDB_CONFIG → $XDG_CONFIG_HOME/zdb/config.toml → $HOME/.config/zdb/config.toml.
-func Load() (Config, error) {
+//
+// Version handling: if the file's version field is greater than CurrentSchemaVersion,
+// Load returns ErrFutureVersion. If less, the migration chain is run forward and
+// the migrated config is written back atomically before returning.
+func Load() (LoadedConfig, error) {
 	path, err := resolvePath()
 	if err != nil {
-		return Config{}, err
+		return LoadedConfig{}, err
+	}
+
+	// Capture snapshot before parsing (used by Slice 2 external-mod detection).
+	var snap Snapshot
+	if fi, err := os.Stat(path); err == nil {
+		snap = Snapshot{
+			Path:  path,
+			MTime: fi.ModTime().UnixNano(),
+			Size:  fi.Size(),
+		}
+	}
+
+	// Step 1: raw TOML bytes.
+	rawBytes, err := os.ReadFile(path)
+	if err != nil {
+		return LoadedConfig{}, fmt.Errorf("zdb: read config %s: %w", path, err)
+	}
+
+	// Step 2: first-pass decode into map for version inspection and migration.
+	var rawMap map[string]any
+	if _, err := toml.Decode(string(rawBytes), &rawMap); err != nil {
+		return LoadedConfig{}, fmt.Errorf("zdb: parse config %s: %w", path, errors.New(sanitizeTOMLError(err)))
+	}
+
+	// Step 3: determine file version and refuse future versions.
+	fileVersion := readVersion(rawMap)
+	target := currentSchemaVersionFn()
+	if fileVersion > target {
+		return LoadedConfig{}, &ErrFutureVersion{FileVersion: fileVersion, MaxKnown: target}
+	}
+
+	// Step 4: run forward migration chain if needed.
+	migrationsRan := fileVersion < target
+	if migrationsRan {
+		if _, err := runMigrations(rawMap, fileVersion); err != nil {
+			return LoadedConfig{}, err
+		}
+	}
+
+	// Step 5: stamp version in the map.
+	rawMap["version"] = int64(target)
+
+	// Step 6: re-encode to canonical TOML, then strict-decode through the struct.
+	var buf strings.Builder
+	if err := toml.NewEncoder(&buf).Encode(rawMap); err != nil {
+		return LoadedConfig{}, fmt.Errorf("zdb: re-encode config %s after migration: %w", path, err)
 	}
 
 	var cfg Config
-	meta, err := toml.DecodeFile(path, &cfg)
+	meta, err := toml.Decode(buf.String(), &cfg)
 	if err != nil {
-		// Sanitize: don't include raw TOML content or DSN in the error
-		return Config{}, fmt.Errorf("zdb: parse config %s: %w", path, errors.New(sanitizeTOMLError(err)))
+		return LoadedConfig{}, fmt.Errorf("zdb: parse config %s: %w", path, errors.New(sanitizeTOMLError(err)))
 	}
 
 	if err := checkUnknownKeys(meta, path); err != nil {
-		return Config{}, err
+		return LoadedConfig{}, err
 	}
 
 	if err := validate(&cfg); err != nil {
-		return Config{}, fmt.Errorf("zdb: invalid config %s: %w", path, err)
+		return LoadedConfig{}, fmt.Errorf("zdb: invalid config %s: %w", path, err)
 	}
 
-	// One-shot migration: if the user has the legacy single-profile [ai]
-	// block and no [[ais]] yet, convert the single block into a "default"
-	// profile and clear the old field so subsequent saves use the new
-	// schema only.
+	// Step 7: legacy [ai] → [[ais]] conversion (post-decode, stays here for v1).
+	// Runs after the map-based migration chain so migration steps see the old
+	// struct shape. For v1 the chain is empty, so order doesn't matter.
 	if cfg.AI != nil && len(cfg.AIs) == 0 {
 		cfg.AIs = []AIProfile{{
 			Name:           "default",
@@ -316,11 +452,9 @@ func Load() (Config, error) {
 		}
 	}
 
-	// Apply defaults
+	// Apply defaults for legacy [ai] field (defensive — normally nil after
+	// the conversion above, but retained for safety).
 	if cfg.AI != nil {
-		// Default the env-var name only when no keyring source is in play —
-		// when KeyringKey is set, leaving APIKeyEnv empty is the explicit
-		// signal that the keyring is the source of truth.
 		if cfg.AI.APIKeyEnv == "" && cfg.AI.KeyringKey == "" {
 			cfg.AI.APIKeyEnv = "AI_API_KEY"
 		}
@@ -329,7 +463,18 @@ func Load() (Config, error) {
 		}
 	}
 
-	return cfg, nil
+	// Step 8: if migrations ran, write the migrated config back atomically.
+	// The snapshot captured in step 1 reflects the pre-migration file; Force
+	// is the right variant here (it also refreshes the snapshot after write).
+	if migrationsRan {
+		newSnap, _, writeErr := SaveWithBackupStatusForce(cfg, path)
+		if writeErr != nil {
+			return LoadedConfig{}, fmt.Errorf("zdb: persist migrated config %s: %w", path, writeErr)
+		}
+		snap = newSnap
+	}
+
+	return LoadedConfig{Config: cfg, Snapshot: snap}, nil
 }
 
 // resolvePathOrDefault is like resolvePath but returns a default path even
