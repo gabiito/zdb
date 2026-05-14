@@ -76,11 +76,13 @@ func main() {
 		// Non-fatal: continue without logging
 	}
 
-	cfg, err := config.LoadOrEmpty()
+	loaded, err := config.LoadOrEmpty()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
+	// Snapshot threading to core.NewApp is Slice 5 (PR 2).
+	cfg := loaded.Config
 
 	app := core.NewApp(cfg, log)
 

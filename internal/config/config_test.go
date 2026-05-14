@@ -13,10 +13,11 @@ import (
 
 func TestLoadFullConfig(t *testing.T) {
 	t.Setenv("ZDB_CONFIG", "testdata/full.toml")
-	cfg, err := config.Load()
+	loaded, err := config.Load()
 	if err != nil {
 		t.Fatalf("Load(full.toml): %v", err)
 	}
+	cfg := loaded.Config
 	if len(cfg.Connections) != 3 {
 		t.Errorf("expected 3 connections, got %d", len(cfg.Connections))
 	}
@@ -33,10 +34,11 @@ func TestLoadFullConfig(t *testing.T) {
 
 func TestLoadAIDisabledConfig(t *testing.T) {
 	t.Setenv("ZDB_CONFIG", "testdata/ai_disabled.toml")
-	cfg, err := config.Load()
+	loaded, err := config.Load()
 	if err != nil {
 		t.Fatalf("Load(ai_disabled.toml): %v", err)
 	}
+	cfg := loaded.Config
 	if cfg.AI != nil {
 		t.Errorf("expected nil AI config, got %+v", cfg.AI)
 	}
@@ -78,10 +80,11 @@ func TestLoadDSNNotLeakedInError(t *testing.T) {
 	// The main DSN-redaction contract is on the logger, not config errors.
 	// But validate that the error from an invalid engine doesn't include the raw DSN.
 	t.Setenv("ZDB_CONFIG", "testdata/full.toml")
-	cfg, err := config.Load()
+	loaded, err := config.Load()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	cfg := loaded.Config
 	// DSN should be stored in the struct but not forced into any error message
 	if !strings.Contains(cfg.Connections[1].DSN, "pass") {
 		t.Skip("test fixture changed")
@@ -93,10 +96,11 @@ func TestLoadDSNNotLeakedInError(t *testing.T) {
 
 func TestDefaultAPIKeyEnv(t *testing.T) {
 	t.Setenv("ZDB_CONFIG", "testdata/full.toml")
-	cfg, err := config.Load()
+	loaded, err := config.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	cfg := loaded.Config
 	// full.toml explicitly sets api_key_env; verify it's respected
 	if cfg.AI.APIKeyEnv != "OPENAI_API_KEY" {
 		t.Errorf("want OPENAI_API_KEY, got %q", cfg.AI.APIKeyEnv)
@@ -233,12 +237,12 @@ func TestLoadOrEmptyRejectsUnknownKey(t *testing.T) {
 // Config and nil error when no file exists (SCEN-8).
 func TestLoadOrEmptyNoFileReturnsEmpty(t *testing.T) {
 	t.Setenv("ZDB_CONFIG", "testdata/does_not_exist_for_empty.toml")
-	cfg, err := config.LoadOrEmpty()
+	loaded, err := config.LoadOrEmpty()
 	if err != nil {
 		t.Fatalf("LoadOrEmpty must return nil error when no file; got: %v", err)
 	}
-	if len(cfg.Connections) != 0 {
-		t.Errorf("expected empty config, got %+v", cfg)
+	if len(loaded.Connections) != 0 {
+		t.Errorf("expected empty config, got %+v", loaded.Config)
 	}
 }
 
@@ -359,7 +363,7 @@ func TestBackupFailureNonFatal(t *testing.T) {
 			{Name: "new", Engine: "sqlite", DSN: "/tmp/b.db"},
 		},
 	}
-	backupErr, writeErr := config.SaveWithBackupStatus(cfgB, path)
+	_, backupErr, writeErr := config.SaveWithBackupStatus(cfgB, path, config.Snapshot{})
 	if writeErr != nil {
 		t.Fatalf("writeErr must be nil; got %v", writeErr)
 	}
@@ -369,10 +373,11 @@ func TestBackupFailureNonFatal(t *testing.T) {
 
 	// The new content must be live.
 	t.Setenv("ZDB_CONFIG", path)
-	got, err := config.Load()
+	loaded, err := config.Load()
 	if err != nil {
 		t.Fatalf("Load after injected-backup-failure save: %v", err)
 	}
+	got := loaded.Config
 	if len(got.Connections) != 1 || got.Connections[0].Name != "new" {
 		t.Errorf("expected new content; got %+v", got.Connections)
 	}
@@ -434,11 +439,15 @@ func TestSaveRoundTrip(t *testing.T) {
 	}
 
 	t.Setenv("ZDB_CONFIG", path)
-	got, err := config.Load()
+	loaded, err := config.Load()
 	if err != nil {
 		t.Fatalf("Load after Save: %v", err)
 	}
+	got := loaded.Config
 
+	// Save stamps Version = CurrentSchemaVersion; update the expected cfg
+	// to match before comparing.
+	cfg.Version = config.CurrentSchemaVersion
 	if !reflect.DeepEqual(cfg, got) {
 		t.Errorf("round-trip mismatch:\n  got  = %+v\n  want = %+v", got, cfg)
 	}

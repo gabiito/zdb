@@ -355,7 +355,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Modal closes on success; backup-skip annotation would not be
 		// visible to the user — using Save() wrapper intentionally.
-		// (REQ-26 carve-out, AC-9)
+		// (REQ-26 carve-out, AC-9). Snapshot threading is Slice 5 (PR 2).
 		if err := config.Save(a.cfg, a.configPath); err != nil {
 			a.aiSetup.SetError(fmt.Sprintf("save config: %v", err))
 			break
@@ -2567,7 +2567,10 @@ func (a *App) saveConfigAnnotated(successMsg string) tea.Cmd {
 	if a.configPath == "" {
 		return a.statusBar.SetErr(fmt.Errorf("[config] no path resolved"))
 	}
-	backupErr, writeErr := config.SaveWithBackupStatus(a.cfg, a.configPath)
+	// Snapshot threading (a.snapshot → newSnap) is wired in Slice 5 (PR 2).
+	// For now we pass a zero-value snapshot; the external-mod check is a no-op
+	// until Slice 2 implements it.
+	_, backupErr, writeErr := config.SaveWithBackupStatus(a.cfg, a.configPath, config.Snapshot{})
 	if writeErr != nil {
 		return a.statusBar.SetErr(fmt.Errorf("[config] save: %v", writeErr))
 	}
