@@ -45,6 +45,6 @@ func runConfigImport(args []string) int {
 		return 1
 	}
 
-	fmt.Printf("zdb: imported config from %s to %s\n", srcPath, dstPath)
+	fmt.Printf("zdb: imported config from %s to %s (version %d)\n", srcPath, dstPath, config.CurrentSchemaVersion)
 	return 0
 }
