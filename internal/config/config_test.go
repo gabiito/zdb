@@ -196,6 +196,26 @@ func TestLoadRejectsUnknownTopLevelKey(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsUnknownAIsKey verifies that a typo inside [[ais]] produces
+// a clear error identifying the offending key (SCEN-3, REQ-5).
+func TestLoadRejectsUnknownAIsKey(t *testing.T) {
+	t.Setenv("ZDB_CONFIG", "testdata/unknown_ais_key.toml")
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("expected error for unknown key in [[ais]], got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "unknown key(s):") {
+		t.Errorf("error must contain 'unknown key(s):'; got: %s", msg)
+	}
+	if !strings.Contains(msg, "modl") {
+		t.Errorf("error must contain the offending key 'modl'; got: %s", msg)
+	}
+	if !strings.Contains(msg, "hint:") {
+		t.Errorf("error must contain the hint line; got: %s", msg)
+	}
+}
+
 // TestLoadOrEmptyRejectsUnknownKey verifies that LoadOrEmpty inherits the
 // strict-mode error when a file exists (SCEN-7, AC-2).
 func TestLoadOrEmptyRejectsUnknownKey(t *testing.T) {
