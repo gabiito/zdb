@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gabiito/zdb/internal/config"
 	"github.com/gabiito/zdb/internal/tui"
@@ -97,5 +98,100 @@ func TestSaveConfigAnnotatedWriteFailureSurfacesErrorOnly(t *testing.T) {
 	// The error message must not contain the success text.
 	if strings.Contains(a.statusBar.Msg(), "AI profile: test") {
 		t.Errorf("error message %q must not contain the success text", a.statusBar.Msg())
+	}
+}
+
+// TestSaveConfigAnnotated_StaleSurface verifies that when the config file is
+// modified externally between load and save, saveConfigAnnotated surfaces the
+// reconcile message in the status bar (Slice 5, design §5.3, REQ-6.3).
+func TestSaveConfigAnnotated_StaleSurface(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := config.Config{
+		Connections: []config.Connection{
+			{Name: "dev", Engine: "sqlite", DSN: ":memory:"},
+		},
+	}
+
+	// Write an initial file and load it to capture a real snapshot.
+	if err := config.Save(cfg, path); err != nil {
+		t.Fatalf("initial Save: %v", err)
+	}
+	t.Setenv("ZDB_CONFIG", path)
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Build an app with the real snapshot threaded in.
+	a := &App{
+		cfg:        loaded.Config,
+		snapshot:   loaded.Snapshot,
+		configPath: path,
+		statusBar:  tui.StatusBarModel{},
+	}
+
+	// Bump mtime externally to simulate an external editor touching the file.
+	future := loaded.Snapshot.MTime/1e9 + 5
+	if err := os.Chtimes(path, time.Unix(future, 0), time.Unix(future, 0)); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	// saveConfigAnnotated must detect the stale snapshot and surface the hint.
+	_ = a.saveConfigAnnotated("connection saved: dev")
+
+	if !a.statusBar.IsErr() {
+		t.Error("statusBar.IsErr() = false; want true on stale-save")
+	}
+	msg := a.statusBar.Msg()
+	if !strings.Contains(msg, "changed externally") {
+		t.Errorf("status bar message %q must contain 'changed externally'", msg)
+	}
+	if !strings.Contains(msg, "zdb config import") {
+		t.Errorf("status bar message %q must contain 'zdb config import'", msg)
+	}
+}
+
+// TestSaveConfigAnnotated_CleanSaveRefreshesSnapshot verifies that after a
+// clean save the internal snapshot is refreshed so the next save also succeeds.
+func TestSaveConfigAnnotated_CleanSaveRefreshesSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := config.Config{
+		Connections: []config.Connection{
+			{Name: "dev", Engine: "sqlite", DSN: ":memory:"},
+		},
+	}
+	if err := config.Save(cfg, path); err != nil {
+		t.Fatalf("initial Save: %v", err)
+	}
+	t.Setenv("ZDB_CONFIG", path)
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	a := &App{
+		cfg:        loaded.Config,
+		snapshot:   loaded.Snapshot,
+		configPath: path,
+		statusBar:  tui.StatusBarModel{},
+	}
+
+	// First save: succeeds and updates snapshot.
+	_ = a.saveConfigAnnotated("first save")
+	if a.statusBar.IsErr() {
+		t.Fatalf("first save produced error: %s", a.statusBar.Msg())
+	}
+
+	// Second save: must also succeed (snapshot was refreshed, no false stale).
+	_ = a.saveConfigAnnotated("second save")
+	if a.statusBar.IsErr() {
+		t.Errorf("second save produced error: %s", a.statusBar.Msg())
+	}
+	if a.statusBar.Msg() != "second save" {
+		t.Errorf("statusBar.Msg() = %q; want %q", a.statusBar.Msg(), "second save")
 	}
 }
