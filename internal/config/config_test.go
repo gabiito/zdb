@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -154,6 +155,139 @@ func assertNoSensitiveData(t *testing.T, s string) {
 }
 
 // ---- Slice 1: atomic write tests ----
+
+// TestSaveCreatesBackup verifies that a second Save creates a .bak file
+// containing the content that was live before the save (AC-3, SCEN-13).
+func TestSaveCreatesBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfgA := config.Config{
+		Connections: []config.Connection{
+			{Name: "original", Engine: "sqlite", DSN: "/tmp/a.db"},
+		},
+	}
+	if err := config.Save(cfgA, path); err != nil {
+		t.Fatalf("first Save: %v", err)
+	}
+
+	// Read what was written as "A"
+	contentA, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile after first save: %v", err)
+	}
+
+	cfgB := config.Config{
+		Connections: []config.Connection{
+			{Name: "updated", Engine: "postgres", DSN: "postgres://localhost/b"},
+		},
+	}
+	if err := config.Save(cfgB, path); err != nil {
+		t.Fatalf("second Save: %v", err)
+	}
+
+	// .bak must contain content A
+	bakPath := path + ".bak"
+	bakContent, err := os.ReadFile(bakPath)
+	if err != nil {
+		t.Fatalf("ReadFile .bak: %v", err)
+	}
+	if string(bakContent) != string(contentA) {
+		t.Errorf(".bak content mismatch:\n  got  = %q\n  want = %q", bakContent, contentA)
+	}
+}
+
+// TestFirstSaveSkipsBackup verifies that the very first Save (no prior file)
+// does not create a .bak file and returns nil (AC-6, SCEN-14).
+func TestFirstSaveSkipsBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := config.Config{
+		Connections: []config.Connection{
+			{Name: "x", Engine: "sqlite", DSN: ":memory:"},
+		},
+	}
+	if err := config.Save(cfg, path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("expected no .bak on first save; got err = %v", err)
+	}
+}
+
+// TestBackupFailureNonFatal verifies that a backup error does not block the
+// write: writeErr is nil, backupErr wraps ErrBackupSkipped, and the new
+// content is persisted (AC-7, SCEN-15).
+func TestBackupFailureNonFatal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	// First save to create the file.
+	cfgA := config.Config{
+		Connections: []config.Connection{
+			{Name: "original", Engine: "sqlite", DSN: "/tmp/a.db"},
+		},
+	}
+	if err := config.Save(cfgA, path); err != nil {
+		t.Fatalf("first Save: %v", err)
+	}
+
+	// Inject a backup failure.
+	restore := config.SetBackupCurrentForTest(func(string) error {
+		return os.ErrPermission
+	})
+	defer restore()
+
+	cfgB := config.Config{
+		Connections: []config.Connection{
+			{Name: "new", Engine: "sqlite", DSN: "/tmp/b.db"},
+		},
+	}
+	backupErr, writeErr := config.SaveWithBackupStatus(cfgB, path)
+	if writeErr != nil {
+		t.Fatalf("writeErr must be nil; got %v", writeErr)
+	}
+	if !errors.Is(backupErr, config.ErrBackupSkipped) {
+		t.Errorf("backupErr must wrap ErrBackupSkipped; got %v", backupErr)
+	}
+
+	// The new content must be live.
+	t.Setenv("ZDB_CONFIG", path)
+	got, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load after injected-backup-failure save: %v", err)
+	}
+	if len(got.Connections) != 1 || got.Connections[0].Name != "new" {
+		t.Errorf("expected new content; got %+v", got.Connections)
+	}
+}
+
+// TestSaveWrapperDiscardsBackupSignal verifies that plain Save() returns nil
+// even when backup fails (SCEN-20, REQ-22).
+func TestSaveWrapperDiscardsBackupSignal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := config.Config{
+		Connections: []config.Connection{
+			{Name: "x", Engine: "sqlite", DSN: "/tmp/x.db"},
+		},
+	}
+	// First save to create the file so backup is attempted.
+	if err := config.Save(cfg, path); err != nil {
+		t.Fatalf("first Save: %v", err)
+	}
+
+	restore := config.SetBackupCurrentForTest(func(string) error {
+		return os.ErrPermission
+	})
+	defer restore()
+
+	if err := config.Save(cfg, path); err != nil {
+		t.Errorf("Save() must return nil even when backup fails; got %v", err)
+	}
+}
 
 // TestSaveRoundTrip verifies that Save/Load produce semantically equivalent configs.
 func TestSaveRoundTrip(t *testing.T) {
