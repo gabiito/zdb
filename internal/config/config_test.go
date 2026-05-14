@@ -1,6 +1,9 @@
 package config_test
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -99,6 +102,45 @@ func TestDefaultAPIKeyEnv(t *testing.T) {
 	}
 }
 
+func TestHasConnectionNamedCaseInsensitive(t *testing.T) {
+	cfg := config.Config{
+		Connections: []config.Connection{
+			{Name: "Prod", Engine: "sqlite", DSN: "/tmp/a.db"},
+			{Name: "staging", Engine: "sqlite", DSN: "/tmp/b.db"},
+		},
+	}
+
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"Prod", true},     // exact
+		{"prod", true},     // lower
+		{"PROD", true},     // upper
+		{"PrOd", true},     // mixed
+		{"Staging", true},  // case-flipped vs "staging"
+		{"dev", false},     // absent
+		{"Prod ", false},   // trailing space — not equal
+		{"", false},        // empty
+	}
+	for _, tc := range cases {
+		if got := cfg.HasConnectionNamed(tc.name); got != tc.want {
+			t.Errorf("HasConnectionNamed(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestLoadRejectsCaseInsensitiveDuplicates(t *testing.T) {
+	t.Setenv("ZDB_CONFIG", "testdata/dup_case.toml")
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("expected error for case-insensitive duplicate names, got nil")
+	}
+	if !strings.Contains(err.Error(), "duplicate name") {
+		t.Errorf("error should mention duplicate name; got: %v", err)
+	}
+}
+
 func assertNoSensitiveData(t *testing.T, s string) {
 	t.Helper()
 	sensitiveSubstrings := []string{
@@ -107,6 +149,65 @@ func assertNoSensitiveData(t *testing.T, s string) {
 	for _, sub := range sensitiveSubstrings {
 		if strings.Contains(strings.ToLower(s), strings.ToLower(sub)) {
 			t.Errorf("error message contains sensitive string %q: %s", sub, s)
+		}
+	}
+}
+
+// ---- Slice 1: atomic write tests ----
+
+// TestSaveRoundTrip verifies that Save/Load produce semantically equivalent configs.
+func TestSaveRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	original := config.Config{
+		Connections: []config.Connection{
+			{Name: "dev", Engine: "sqlite", DSN: "/tmp/dev.db"},
+			{Name: "prod", Engine: "postgres", DSN: "postgres://localhost/prod"},
+		},
+		AIs: []config.AIProfile{
+			{Name: "default", Provider: "openai-compat", BaseURL: "https://api.openai.com/v1", Model: "gpt-4o"},
+		},
+		ActiveAI: "default",
+	}
+
+	if err := config.Save(original, path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	t.Setenv("ZDB_CONFIG", path)
+	got, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load after Save: %v", err)
+	}
+
+	if !reflect.DeepEqual(original, got) {
+		t.Errorf("round-trip mismatch:\n  got  = %+v\n  want = %+v", got, original)
+	}
+}
+
+// TestAtomicWriteNoTempfileLeakedOnSuccess verifies no config-*.tmp file remains
+// in the directory after a successful Save (AC-4).
+func TestAtomicWriteNoTempfileLeakedOnSuccess(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := config.Config{
+		Connections: []config.Connection{
+			{Name: "x", Engine: "sqlite", DSN: ":memory:"},
+		},
+	}
+	if err := config.Save(cfg, path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("leftover tempfile after successful Save: %s", e.Name())
 		}
 	}
 }

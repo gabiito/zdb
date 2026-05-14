@@ -4,8 +4,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -36,6 +38,18 @@ type AIProfile struct {
 	APIKeyEnv      string `toml:"api_key_env,omitempty"`
 	KeyringKey     string `toml:"keyring_key,omitempty"`
 	TimeoutSeconds int    `toml:"timeout_seconds,omitempty"`
+}
+
+// HasConnectionNamed reports whether a connection with the given name is
+// already present. Comparison is case-insensitive — "Prod" and "prod" are
+// considered the same name.
+func (c *Config) HasConnectionNamed(name string) bool {
+	for _, conn := range c.Connections {
+		if strings.EqualFold(conn.Name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // ActiveProfile returns a pointer to the active profile, or nil when no
@@ -100,19 +114,140 @@ var validEngines = map[string]bool{
 // where one would be created.
 func ResolvePath() (string, error) { return resolvePathOrDefault() }
 
-// Save serialises cfg back to the given path, creating the parent directory
-// if needed. Note: TOML encoding loses comments — original annotations in a
-// hand-edited config will not survive a save.
-func Save(cfg Config, path string) error {
+// ErrBackupSkipped is returned as the backupErr from SaveWithBackupStatus when
+// the .bak snapshot could not be refreshed. A nil writeErr alongside this
+// sentinel means the new config WAS persisted successfully.
+//
+// The canonical status-bar annotation when this sentinel is detected is:
+// " (backup skipped)" — append it to the existing success message.
+var ErrBackupSkipped = errors.New("zdb: backup snapshot was not refreshed")
+
+// backupCurrentFn is a test seam: package tests can replace this variable to
+// inject backup failures deterministically. Production code always points at
+// backupCurrent.
+var backupCurrentFn = backupCurrent
+
+// SetBackupCurrentForTest replaces the backup function with fn for the
+// duration of a test and returns a restore function. Call defer restore() in
+// the test.
+func SetBackupCurrentForTest(fn func(string) error) (restore func()) {
+	prev := backupCurrentFn
+	backupCurrentFn = fn
+	return func() { backupCurrentFn = prev }
+}
+
+// SaveWithBackupStatus is identical to Save but returns the backup-step
+// outcome separately. A non-nil backupErr with a nil writeErr means the new
+// config WAS persisted but the .bak snapshot could not be refreshed.
+// Callers can check errors.Is(backupErr, ErrBackupSkipped) to distinguish a
+// fully-successful save from a save-with-backup-skipped.
+func SaveWithBackupStatus(cfg Config, path string) (backupErr error, writeErr error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	if err := backupCurrentFn(path); err != nil {
+		backupErr = fmt.Errorf("%w: %v", ErrBackupSkipped, err)
+	}
+	writeErr = atomicWriteTOML(cfg, path)
+	return backupErr, writeErr
+}
+
+// Save serialises cfg back to the given path, creating the parent directory
+// if needed. It writes atomically via a tempfile in the same directory
+// followed by os.Rename, so the destination is never observed in a truncated
+// or partially-written state.
+//
+// Note: TOML encoding loses comments — original annotations in a hand-edited
+// config will not survive a save.
+//
+// On Windows, os.Rename may fail if the destination already exists; Windows is
+// not an officially supported platform.
+//
+// If a crash occurs between tempfile creation and the rename, a file matching
+// the glob config-*.tmp may be left in the config directory. Load() does NOT
+// remove these files automatically — remove them manually if they appear.
+func Save(cfg Config, path string) error {
+	_, err := SaveWithBackupStatus(cfg, path)
+	return err
+}
+
+// backupCurrent copies the live config file at path to path+".bak" using a
+// tempfile-then-rename sequence so the live file is never absent. If path does
+// not exist (first-ever save), it returns nil without creating any .bak file.
+func backupCurrent(path string) error {
+	src, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // first save — nothing to back up
+		}
 		return err
 	}
-	f, err := os.Create(path)
+	defer src.Close()
+
+	dir := filepath.Dir(path)
+	dst, err := os.CreateTemp(dir, "config-*.bak.tmp")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return toml.NewEncoder(f).Encode(cfg)
+
+	committed := false
+	defer func() {
+		if !committed {
+			os.Remove(dst.Name())
+		}
+	}()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
+		return err
+	}
+	if err := dst.Sync(); err != nil {
+		dst.Close()
+		return err
+	}
+	if err := dst.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(dst.Name(), path+".bak"); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+// atomicWriteTOML encodes cfg as TOML into a tempfile in the same directory as
+// path, then renames the tempfile over path atomically. The tempfile is
+// removed if encoding or syncing fails.
+func atomicWriteTOML(cfg Config, path string) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create tempfile: %w", err)
+	}
+
+	committed := false
+	defer func() {
+		if !committed {
+			os.Remove(tmp.Name())
+		}
+	}()
+
+	if err := toml.NewEncoder(tmp).Encode(cfg); err != nil {
+		tmp.Close()
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync tempfile: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close tempfile: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("rename %s -> %s: %w", tmp.Name(), path, err)
+	}
+	committed = true
+	return nil
 }
 
 // LoadOrEmpty loads the configuration if a file is found at any of the lookup
@@ -255,10 +390,11 @@ func validate(cfg *Config) error {
 		if c.Name == "" {
 			return fmt.Errorf("connections[%d]: name is required", i)
 		}
-		if seen[c.Name] {
-			return fmt.Errorf("connections[%d]: duplicate name %q", i, c.Name)
+		key := strings.ToLower(c.Name)
+		if seen[key] {
+			return fmt.Errorf("connections[%d]: duplicate name %q (names are case-insensitive)", i, c.Name)
 		}
-		seen[c.Name] = true
+		seen[key] = true
 		if !validEngines[c.Engine] {
 			return fmt.Errorf("connections[%d] %q: engine must be one of sqlite, postgres, mysql; got %q", i, c.Name, c.Engine)
 		}
