@@ -53,20 +53,33 @@ func versionString() string {
 }
 
 func main() {
-	for _, a := range os.Args[1:] {
-		switch a {
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
 		case "-v", "--version", "version":
 			fmt.Println(versionString())
 			return
 		case "-h", "--help":
-			fmt.Println("usage: zdb [--version]")
-			fmt.Println("  zdb is interactive — no flags needed for normal use.")
-			fmt.Println("  set ZDB_DEBUG=1 to enable debug logging.")
-			fmt.Println("  set ZDB_CONFIG=/path/to/config.toml to override the config location.")
+			printHelp()
 			return
+		case "config":
+			os.Exit(runConfigCmd(os.Args[2:]))
 		}
 	}
+	runTUI()
+}
 
+// printHelp prints usage information to stdout.
+func printHelp() {
+	fmt.Println("usage: zdb [--version] [config <subcommand>]")
+	fmt.Println("  zdb is interactive — no flags needed for normal use.")
+	fmt.Println("  zdb config import <path>  import a zdb config file.")
+	fmt.Println("  set ZDB_DEBUG=1 to enable debug logging.")
+	fmt.Println("  set ZDB_CONFIG=/path/to/config.toml to override the config location.")
+}
+
+// runTUI starts the interactive TUI. This is the default mode when no
+// subcommand is given.
+func runTUI() {
 	debug := os.Getenv("ZDB_DEBUG") == "1"
 
 	log, err := logging.Init(debug)
