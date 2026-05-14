@@ -154,6 +154,101 @@ func assertNoSensitiveData(t *testing.T, s string) {
 	}
 }
 
+// ---- Slice 3: strict TOML parsing tests ----
+
+// TestLoadRejectsUnknownNestedKey verifies that a typo inside [[connections]]
+// produces a clear error (SCEN-2, AC-1).
+func TestLoadRejectsUnknownNestedKey(t *testing.T) {
+	t.Setenv("ZDB_CONFIG", "testdata/unknown_key.toml")
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("expected error for unknown nested key, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "unknown key(s):") {
+		t.Errorf("error must contain 'unknown key(s):'; got: %s", msg)
+	}
+	if !strings.Contains(msg, "nme") {
+		t.Errorf("error must contain the offending key 'nme'; got: %s", msg)
+	}
+	if !strings.Contains(msg, "testdata/unknown_key.toml") {
+		t.Errorf("error must contain the config path; got: %s", msg)
+	}
+	if !strings.Contains(msg, "hint:") {
+		t.Errorf("error must contain the hint line; got: %s", msg)
+	}
+}
+
+// TestLoadRejectsUnknownTopLevelKey verifies that a stray top-level key
+// produces a clear error (SCEN-1).
+func TestLoadRejectsUnknownTopLevelKey(t *testing.T) {
+	t.Setenv("ZDB_CONFIG", "testdata/unknown_top_level.toml")
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("expected error for unknown top-level key, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "unrelated_setting") {
+		t.Errorf("error must contain 'unrelated_setting'; got: %s", msg)
+	}
+	if !strings.Contains(msg, "unknown key(s):") {
+		t.Errorf("error must contain 'unknown key(s):'; got: %s", msg)
+	}
+}
+
+// TestLoadOrEmptyRejectsUnknownKey verifies that LoadOrEmpty inherits the
+// strict-mode error when a file exists (SCEN-7, AC-2).
+func TestLoadOrEmptyRejectsUnknownKey(t *testing.T) {
+	t.Setenv("ZDB_CONFIG", "testdata/unknown_key.toml")
+	_, err := config.LoadOrEmpty()
+	if err == nil {
+		t.Fatal("LoadOrEmpty must return error for unknown key in existing file")
+	}
+	if !strings.Contains(err.Error(), "unknown key(s):") {
+		t.Errorf("error shape mismatch; got: %s", err.Error())
+	}
+}
+
+// TestLoadOrEmptyNoFileReturnsEmpty verifies that LoadOrEmpty returns an empty
+// Config and nil error when no file exists (SCEN-8).
+func TestLoadOrEmptyNoFileReturnsEmpty(t *testing.T) {
+	t.Setenv("ZDB_CONFIG", "testdata/does_not_exist_for_empty.toml")
+	cfg, err := config.LoadOrEmpty()
+	if err != nil {
+		t.Fatalf("LoadOrEmpty must return nil error when no file; got: %v", err)
+	}
+	if len(cfg.Connections) != 0 {
+		t.Errorf("expected empty config, got %+v", cfg)
+	}
+}
+
+// TestLoadLegacyAIBlockNotRejected verifies that the deprecated [ai] block
+// is NOT treated as an unknown key (SCEN-5, REQ-6).
+func TestLoadLegacyAIBlockNotRejected(t *testing.T) {
+	t.Setenv("ZDB_CONFIG", "testdata/full.toml")
+	_, err := config.Load()
+	if err != nil && strings.Contains(err.Error(), "unknown key(s):") {
+		t.Errorf("[ai] block must not trigger unknown-key error; got: %s", err.Error())
+	}
+}
+
+// TestLoadSyntaxErrorTakesPriority verifies that a TOML syntax error surfaces
+// the parse prefix, not the unknown-key error (SCEN-6, REQ-7).
+func TestLoadSyntaxErrorTakesPriority(t *testing.T) {
+	t.Setenv("ZDB_CONFIG", "testdata/invalid.toml")
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("expected error for invalid TOML")
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "zdb: parse config") {
+		t.Errorf("error must start with 'zdb: parse config'; got: %s", msg)
+	}
+	if strings.Contains(msg, "unknown key(s):") {
+		t.Errorf("parse error must NOT mention unknown keys; got: %s", msg)
+	}
+}
+
 // ---- Slice 1: atomic write tests ----
 
 // TestSaveCreatesBackup verifies that a second Save creates a .bak file
@@ -289,23 +384,32 @@ func TestSaveWrapperDiscardsBackupSignal(t *testing.T) {
 	}
 }
 
-// TestSaveRoundTrip verifies that Save/Load produce semantically equivalent configs.
+// TestSaveRoundTrip verifies that Save/Load produce a valid, parseable config.
+// Defaults applied by Load() (APIKeyEnv, TimeoutSeconds) are reflected in the
+// comparison — the round-trip checks structural integrity, not exact byte equality.
 func TestSaveRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 
-	original := config.Config{
+	cfg := config.Config{
 		Connections: []config.Connection{
 			{Name: "dev", Engine: "sqlite", DSN: "/tmp/dev.db"},
 			{Name: "prod", Engine: "postgres", DSN: "postgres://localhost/prod"},
 		},
 		AIs: []config.AIProfile{
-			{Name: "default", Provider: "openai-compat", BaseURL: "https://api.openai.com/v1", Model: "gpt-4o"},
+			{
+				Name:           "default",
+				Provider:       "openai-compat",
+				BaseURL:        "https://api.openai.com/v1",
+				Model:          "gpt-4o",
+				APIKeyEnv:      "MY_KEY",
+				TimeoutSeconds: 45,
+			},
 		},
 		ActiveAI: "default",
 	}
 
-	if err := config.Save(original, path); err != nil {
+	if err := config.Save(cfg, path); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -315,8 +419,8 @@ func TestSaveRoundTrip(t *testing.T) {
 		t.Fatalf("Load after Save: %v", err)
 	}
 
-	if !reflect.DeepEqual(original, got) {
-		t.Errorf("round-trip mismatch:\n  got  = %+v\n  want = %+v", got, original)
+	if !reflect.DeepEqual(cfg, got) {
+		t.Errorf("round-trip mismatch:\n  got  = %+v\n  want = %+v", got, cfg)
 	}
 }
 

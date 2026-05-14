@@ -1,0 +1,6 @@
+[[connections]]
+name   = "scratch"
+engine = "sqlite"
+dsn    = ":memory:"
+
+unrelated_setting = 1

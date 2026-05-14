@@ -271,9 +271,14 @@ func Load() (Config, error) {
 	}
 
 	var cfg Config
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	meta, err := toml.DecodeFile(path, &cfg)
+	if err != nil {
 		// Sanitize: don't include raw TOML content or DSN in the error
 		return Config{}, fmt.Errorf("zdb: parse config %s: %w", path, errors.New(sanitizeTOMLError(err)))
+	}
+
+	if err := checkUnknownKeys(meta, path); err != nil {
+		return Config{}, err
 	}
 
 	if err := validate(&cfg); err != nil {
@@ -413,6 +418,31 @@ func validate(cfg *Config) error {
 	}
 
 	return nil
+}
+
+// checkUnknownKeys returns an error if meta.Undecoded() reports any keys that
+// were present in the file but not mapped to a struct field. The error format is:
+//
+//	zdb: invalid config <path>: unknown key(s): <comma-separated key paths>
+//	hint: zDB owns this file; remove unknown keys or fix typos
+//
+// This check runs AFTER successful TOML parsing and BEFORE validate(), so a
+// syntax error always produces the existing "zdb: parse config ..." prefix
+// instead of reaching this function.
+func checkUnknownKeys(meta toml.MetaData, path string) error {
+	undecoded := meta.Undecoded()
+	if len(undecoded) == 0 {
+		return nil
+	}
+	parts := make([]string, len(undecoded))
+	for i, k := range undecoded {
+		parts[i] = k.String()
+	}
+	return fmt.Errorf(
+		"zdb: invalid config %s: unknown key(s): %s\nhint: zDB owns this file; remove unknown keys or fix typos",
+		path,
+		strings.Join(parts, ", "),
+	)
 }
 
 // sanitizeTOMLError strips any potentially sensitive content from TOML parse errors.
