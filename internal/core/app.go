@@ -154,11 +154,8 @@ func NewApp(loaded config.LoadedConfig, log *slog.Logger) *App {
 
 	provider := ai.New(resolveAIConfig(cfg.ActiveProfile()))
 
-	store, err := views.NewStore()
-	if err != nil {
-		log.Warn("views store unavailable", "err", err)
-	}
-
+	// viewsStore is nil until the first successful ConnectedMsg — the store
+	// is re-initialised per-connection in the ConnectedMsg handler (Slice 4).
 	configPath, err := config.ResolvePath()
 	if err != nil {
 		log.Warn("config path resolution failed", "err", err)
@@ -189,7 +186,6 @@ func NewApp(loaded config.LoadedConfig, log *slog.Logger) *App {
 		inflight:    make(map[string]context.CancelFunc),
 		spinner:     s,
 		sqlBar:      tui.NewSqlBarModel(80),
-		viewsStore:  store,
 		configPath:  configPath,
 		lastDataTab: -1,
 	}
