@@ -7,11 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] — 2026-05-15
+## [0.2.0] — 2026-05-15
 
-First feature-complete release. A single-binary TUI database viewer for
-SQLite, Postgres, and MySQL with built-in AI assistance and durable
-config management.
+First feature-complete minor bump. Bundles three SDD cycles' worth of
+work into a single release: per-connection saved views with a guided
+copy-view flow, the full app-owns-config stack (schema versioning,
+migration framework, `zdb config import` CLI, external-modification
+detection), and the config-durability foundation (atomic writes,
+rotating backup, strict TOML parsing). Plus quality-of-life fixes for
+Esc handling on internal lists and gated save semantics in the SQL
+editor.
 
 ### Added
 
@@ -76,10 +81,57 @@ config management.
   per-connection structure. (Subsequent migrations append a numeric
   suffix: `.legacy.bak.1`, `.legacy.bak.2`, etc.)
 
+### Fixed
+- Pressing **Esc** on any internal `bubbles/list` (table picker in the
+  schema browser, connection picker, views modal, JOIN wizard) no
+  longer quits the app — the library's default Quit binding on
+  `[q, esc]` is now disabled on every list the TUI constructs.
+- **Ctrl+S** in the SQL editor is now gated by a successful execute
+  against the active connection. Previously the editor could save a
+  view whose SQL would fail every time it ran (e.g. after editing a
+  copied view to reference a non-existent table). Save still fires
+  after the gate passes; on execute failure the editor stays open
+  with the error visible.
+- `TestLoadFullConfig`, `TestLoadAIDisabledConfig`, and
+  `TestDefaultAPIKeyEnv` have been migrated to the `ActiveProfile()`
+  API. They were dereferencing the deprecated `cfg.AI` pointer that
+  `Load()` zeroes after copying values into `AIs[0]`, panicking on
+  every run. The full test suite is now green.
+
 ### Supported platforms
 - `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`.
 - macOS-specific atomic-rename semantics are honored.
 - Windows is not an officially supported target.
 
-[Unreleased]: https://github.com/gabiito/zdb/compare/v0.1.0...HEAD
+## [0.1.3] — 2026-05-11
+
+### Added
+- F1 shortcuts overlay listing every keybinding by screen.
+- `--version` flag (and `-v`, `version`) reporting build info via
+  `runtime/debug.BuildInfo`.
+
+## [0.1.2] — 2026-05-11
+
+### Added
+- Connection picker logo panel (right-hand wordmark when the terminal
+  is wide enough).
+
+## [0.1.1] — 2026-05-11
+
+### Added
+- MIT license.
+
+## [0.1.0] — 2026-05-11
+
+### Added
+- First release: single-binary TUI database viewer for SQLite,
+  Postgres, and MySQL. Connection picker, schema browser, data viewer
+  with cell edit, raw SQL panel, JOIN filter, secure secret storage,
+  AI Ask panel, Catppuccin palette.
+
+[Unreleased]: https://github.com/gabiito/zdb/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/gabiito/zdb/compare/v0.1.3...v0.2.0
+[0.1.3]: https://github.com/gabiito/zdb/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/gabiito/zdb/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/gabiito/zdb/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/gabiito/zdb/releases/tag/v0.1.0
