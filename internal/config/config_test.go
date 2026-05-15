@@ -22,14 +22,18 @@ func TestLoadFullConfig(t *testing.T) {
 	if len(cfg.Connections) != 3 {
 		t.Errorf("expected 3 connections, got %d", len(cfg.Connections))
 	}
-	if cfg.AI == nil {
-		t.Fatal("expected AI config, got nil")
+	// full.toml uses the legacy single [ai] block. Load() migrates it into
+	// AIs[0] with Name="default" and zeroes the deprecated cfg.AI pointer.
+	// Assert on the runtime API (ActiveProfile), not the deprecated field.
+	profile := cfg.ActiveProfile()
+	if profile == nil {
+		t.Fatal("expected active AI profile after legacy [ai] migration, got nil")
 	}
-	if cfg.AI.Model != "gpt-4o-mini" {
-		t.Errorf("AI.Model = %q, want gpt-4o-mini", cfg.AI.Model)
+	if profile.Model != "gpt-4o-mini" {
+		t.Errorf("profile.Model = %q, want gpt-4o-mini", profile.Model)
 	}
-	if cfg.AI.APIKeyEnv != "OPENAI_API_KEY" {
-		t.Errorf("AI.APIKeyEnv = %q, want OPENAI_API_KEY", cfg.AI.APIKeyEnv)
+	if profile.APIKeyEnv != "OPENAI_API_KEY" {
+		t.Errorf("profile.APIKeyEnv = %q, want OPENAI_API_KEY", profile.APIKeyEnv)
 	}
 }
 
@@ -40,8 +44,14 @@ func TestLoadAIDisabledConfig(t *testing.T) {
 		t.Fatalf("Load(ai_disabled.toml): %v", err)
 	}
 	cfg := loaded.Config
-	if cfg.AI != nil {
-		t.Errorf("expected nil AI config, got %+v", cfg.AI)
+	// The deprecated cfg.AI pointer is ALWAYS nil post-Load (the migration
+	// step zeroes it). Validate via the runtime API instead — "AI disabled"
+	// means ActiveProfile returns nil and AIs is empty.
+	if profile := cfg.ActiveProfile(); profile != nil {
+		t.Errorf("expected no active AI profile when [ai] block is absent, got %+v", profile)
+	}
+	if len(cfg.AIs) != 0 {
+		t.Errorf("expected zero AI profiles, got %d", len(cfg.AIs))
 	}
 	if len(cfg.Connections) != 1 {
 		t.Errorf("expected 1 connection, got %d", len(cfg.Connections))
@@ -102,9 +112,14 @@ func TestDefaultAPIKeyEnv(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	cfg := loaded.Config
-	// full.toml explicitly sets api_key_env; verify it's respected
-	if cfg.AI.APIKeyEnv != "OPENAI_API_KEY" {
-		t.Errorf("want OPENAI_API_KEY, got %q", cfg.AI.APIKeyEnv)
+	profile := cfg.ActiveProfile()
+	if profile == nil {
+		t.Fatal("expected active AI profile from legacy [ai] migration, got nil")
+	}
+	// full.toml explicitly sets api_key_env; verify the value survives the
+	// legacy-to-AIs migration and is exposed via ActiveProfile.
+	if profile.APIKeyEnv != "OPENAI_API_KEY" {
+		t.Errorf("want OPENAI_API_KEY, got %q", profile.APIKeyEnv)
 	}
 }
 
