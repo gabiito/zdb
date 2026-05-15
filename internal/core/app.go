@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -79,6 +80,16 @@ type App struct {
 	// Set before the TUI starts (e.g. from legacy migration in main.go) so
 	// the message appears on the first rendered frame.
 	pendingStatusMsg string
+
+	// copyMode tracks a "copy view from another connection" flow. It is set
+	// when the user picks a source view in the views modal (CopyViewSelectedMsg)
+	// and cleared on cancel, successful save, modal close, or connection switch.
+	copyMode copyModeState
+
+	// prevScreen is a single-slot "return address" used when the copy-mode
+	// flow opens the SQL editor so it knows which screen to return to on
+	// cancel or successful save. Cleared alongside copyMode.
+	prevScreen ScreenID
 
 	// Pending password / DSN template captured between AddConnectionSubmit
 	// and the testConnResult callback. The password lives only in memory
@@ -180,7 +191,7 @@ func NewApp(loaded config.LoadedConfig, log *slog.Logger) *App {
 		startScreen = ScreenWelcome
 	}
 
-	return &App{
+	app := &App{
 		cfg:         cfg,
 		snapshot:    loaded.Snapshot,
 		log:         log,
@@ -194,6 +205,21 @@ func NewApp(loaded config.LoadedConfig, log *slog.Logger) *App {
 		configPath:  configPath,
 		lastDataTab: -1,
 	}
+
+	// Emit a one-shot load-time warning for any slug collisions found in the
+	// config (REQ-5). Non-fatal — the app starts regardless.
+	for _, col := range cfg.SlugCollisions(views.Slug) {
+		app.SetPendingStatusMsg(fmt.Sprintf(
+			"[views] slug collision detected: connections %q and %q share slug %q",
+			col.A, col.B, col.Slug,
+		))
+		// Only surface the first collision to keep the UI clean. Subsequent
+		// collisions are logged only. A future improvement could queue multiple
+		// messages, but the single-slot pending message is fine for v1.
+		break
+	}
+
+	return app
 }
 
 // SetPendingStatusMsg stores a one-shot status-bar message that is emitted as
@@ -403,6 +429,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.connName = msg.ConnName
 			cmds = append(cmds, a.statusBar.SetMsg("Connected: "+msg.ConnName))
+			// Re-init the views store for the new connection (REQ-9).
+			conn := findConn(a.cfg.Connections, msg.ConnName)
+			if conn != nil {
+				store, err := views.NewStoreForConnection(*conn)
+				if err != nil {
+					a.log.Warn("views store init failed", "conn", msg.ConnName, "err", err)
+					a.viewsStore = nil
+				} else {
+					a.viewsStore = store
+				}
+			} else {
+				a.viewsStore = nil
+			}
+			// Discard any in-progress copy-mode flow on connection switch (REQ-23).
+			a.endCopyMode()
 			// Introspect schema
 			cmds = append(cmds, a.introspectCmd())
 		}
@@ -820,6 +861,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.addConn.SetError("a connection with that name already exists")
 			break
 		}
+		// Slug-empty and slug-collision guards (REQ-3, REQ-4).
+		if slug := views.Slug(conn.Name); slug == "" {
+			a.addConn.SetError("name must contain at least one alphanumeric character after slug normalization")
+			break
+		} else if a.cfg.HasConnectionSlugCollision(slug, "") {
+			a.addConn.SetError("a connection name producing the same filesystem path already exists")
+			break
+		}
 
 		// Ask-at-connect intent: empty password field on a non-sqlite engine,
 		// either with a `{password}` placeholder typed explicitly or with no
@@ -934,6 +983,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.editConn.SetError("a connection with that name already exists")
 			break
 		}
+		// Slug-empty and slug-collision guards (REQ-3, REQ-4).
+		if slug := views.Slug(conn.Name); slug == "" {
+			a.editConn.SetError("name must contain at least one alphanumeric character after slug normalization")
+			break
+		} else if a.cfg.HasConnectionSlugCollision(slug, msg.Original.Name) {
+			a.editConn.SetError("a connection name producing the same filesystem path already exists")
+			break
+		}
 
 		// Original was ask-at-connect (placeholder DSN, no keyring, no env)
 		// and the user didn't supply a new password — there's nothing to
@@ -1015,13 +1072,40 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
+
+		// Best-effort views directory rename when the connection's slug changes
+		// (REQ-11). On failure: append a warning to the status message — do NOT
+		// abort the config save.
+		msgText := "connection updated: " + toSave.Name
+		oldSlug := views.Slug(a.pendingEditOriginal.Name)
+		newSlug := views.Slug(toSave.Name)
+		if oldSlug != newSlug && oldSlug != "" && newSlug != "" {
+			if base, baseErr := views.ConfigDir(); baseErr == nil {
+				oldDir := filepath.Join(base, "views", oldSlug)
+				newDir := filepath.Join(base, "views", newSlug)
+				if _, statErr := os.Stat(oldDir); statErr == nil {
+					if renameErr := os.Rename(oldDir, newDir); renameErr != nil {
+						msgText += fmt.Sprintf(" — [views] could not rename directory: %v", renameErr)
+						a.log.Warn("views dir rename failed", "old", oldDir, "new", newDir, "err", renameErr)
+					}
+				}
+			}
+		}
+		// Re-init views store if this is the currently active connection.
+		if a.connName == a.pendingEditOriginal.Name {
+			a.connName = toSave.Name
+			if store, storeErr := views.NewStoreForConnection(toSave); storeErr == nil {
+				a.viewsStore = store
+			}
+		}
+
 		a.pendingEditOriginal = config.Connection{}
 		a.pendingEditPassword = ""
 		a.pendingEditPasswordChanged = false
 		if a.configPath == "" {
 			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[config] no path resolved — connection updated in-memory only")))
 		} else {
-			cmds = append(cmds, a.saveConfigAnnotated("connection updated: "+toSave.Name))
+			cmds = append(cmds, a.saveConfigAnnotated(msgText))
 		}
 		a.modal = ModalNone
 		if a.screen == ScreenConnPicker {
@@ -2021,6 +2105,17 @@ func (a *App) nextJoinAlias() string {
 	return string(rune('a' + len(a.joinChain)))
 }
 
+// findConn returns a pointer to the first connection with the given name
+// (case-sensitive, as stored in config). Returns nil if not found.
+func findConn(conns []config.Connection, name string) *config.Connection {
+	for i := range conns {
+		if conns[i].Name == name {
+			return &conns[i]
+		}
+	}
+	return nil
+}
+
 // loadViewItems fetches saved views from the store as TUI items. Errors are
 // surfaced via the status bar and the modal opens with an empty list.
 func (a *App) loadViewItems() []tui.ViewItem {
@@ -2388,6 +2483,29 @@ func (a *App) openSQLEditor() {
 	a.screen = ScreenSQLEditor
 }
 
+// openSQLEditorForCopy opens the SQL editor prefilled with sourceSQL as part
+// of the copy-view flow. Saves the current screen in prevScreen so the user
+// can return to it on cancel or after a successful save.
+func (a *App) openSQLEditorForCopy(sourceSQL string) {
+	a.prevScreen = a.screen
+	a.sqlEditor = tui.NewSQLEditorModel(a.width, a.height)
+	a.refreshSqlBarSchema()
+	a.sqlEditor.SetValue(sourceSQL)
+	a.screen = ScreenSQLEditor
+}
+
+// copyModeState holds the state for the "copy view from another connection"
+// flow. The zero value represents "no copy in flight".
+type copyModeState struct {
+	active         bool
+	sourceConn     string // connection name the view came from
+	sourceViewName string // original view name (prefill for save modal)
+	sourceSQL      string // SQL prefilled into the editor
+}
+
+// endCopyMode clears the copy-mode state to its zero value.
+func (a *App) endCopyMode() { a.copyMode = copyModeState{} }
+
 // isFilterClause reports whether the input looks like a SQL clause that
 // should be appended to an existing query (a filter) rather than run as
 // a standalone statement. Recognized starts: WHERE, ORDER BY, GROUP BY,
@@ -2510,7 +2628,22 @@ func (a *App) deleteConnection(name string) tea.Cmd {
 		}
 	}
 
-	cmd := a.saveConfigAnnotated("connection deleted: " + name)
+	// Best-effort views directory removal (REQ-12). On failure: surface a
+	// status-bar warning and do NOT abort the config delete.
+	statusMsg := "connection deleted: " + name
+	if slug := views.Slug(removed.Name); slug != "" {
+		if base, baseErr := views.ConfigDir(); baseErr == nil {
+			dir := filepath.Join(base, "views", slug)
+			if _, statErr := os.Stat(dir); statErr == nil {
+				if rmErr := os.RemoveAll(dir); rmErr != nil {
+					statusMsg += fmt.Sprintf(" — [views] could not remove directory: %v", rmErr)
+					a.log.Warn("views dir remove failed", "dir", dir, "err", rmErr)
+				}
+			}
+		}
+	}
+
+	cmd := a.saveConfigAnnotated(statusMsg)
 
 	if len(a.cfg.Connections) == 0 {
 		a.screen = ScreenWelcome
