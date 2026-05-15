@@ -34,7 +34,8 @@ func TestViewsListModeTransitionsC(t *testing.T) {
 }
 
 // TestViewsListModeEscFromPickConn verifies that pressing Esc in modePickConn
-// emits CloseViewsMsg (App will re-open the modal in modeViews).
+// steps back to modeViews and emits BackToViewsMsg so the App reloads the
+// current connection's views into the still-open modal.
 func TestViewsListModeEscFromPickConn(t *testing.T) {
 	m := NewViewsListModel(nil, 80, 24)
 	m.mode = modePickConn
@@ -45,11 +46,36 @@ func TestViewsListModeEscFromPickConn(t *testing.T) {
 		t.Errorf("mode after Esc from pickConn = %v; want modeViews", m2.mode)
 	}
 	if cmd == nil {
-		t.Fatal("cmd is nil; want CloseViewsMsg command")
+		t.Fatal("cmd is nil; want BackToViewsMsg command")
 	}
 	msg := cmd()
-	if _, ok := msg.(CloseViewsMsg); !ok {
-		t.Errorf("cmd() = %T; want CloseViewsMsg", msg)
+	if _, ok := msg.(BackToViewsMsg); !ok {
+		t.Errorf("cmd() = %T; want BackToViewsMsg", msg)
+	}
+}
+
+// TestViewsListModeEscFromPickView verifies that pressing Esc in modePickView
+// steps back to modePickConn and emits EnterPickConnMsg so the App reloads
+// the other-connections list into the still-open modal.
+func TestViewsListModeEscFromPickView(t *testing.T) {
+	m := NewViewsListModel(nil, 80, 24)
+	m.mode = modePickView
+	m.pickedConn = "prod"
+
+	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+
+	if m2.mode != modePickConn {
+		t.Errorf("mode after Esc from pickView = %v; want modePickConn", m2.mode)
+	}
+	if m2.pickedConn != "" {
+		t.Errorf("pickedConn after Esc from pickView = %q; want empty", m2.pickedConn)
+	}
+	if cmd == nil {
+		t.Fatal("cmd is nil; want EnterPickConnMsg command")
+	}
+	msg := cmd()
+	if _, ok := msg.(EnterPickConnMsg); !ok {
+		t.Errorf("cmd() = %T; want EnterPickConnMsg", msg)
 	}
 }
 

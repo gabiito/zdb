@@ -132,6 +132,19 @@ func (m *ViewsListModel) SetConnItems(names []string) {
 	m.list.SetShowFilter(len(names) > 0)
 }
 
+// SetViewItems replaces the list content with the active connection's views
+// (modeViews). Used when stepping back from modePickConn via Esc — the App
+// reloads the current view list and the modal stays open.
+func (m *ViewsListModel) SetViewItems(items []ViewItem) {
+	listItems := make([]list.Item, len(items))
+	for i, v := range items {
+		listItems[i] = v
+	}
+	m.list.SetItems(listItems)
+	m.list.Title = "Saved views"
+	m.list.SetShowFilter(len(listItems) > 0)
+}
+
 // SetViewItemsForConn replaces the list content with ViewItems for the
 // chosen source connection (modePickView).
 func (m *ViewsListModel) SetViewItemsForConn(connName string, items []ViewItem) {
@@ -155,13 +168,14 @@ func (m ViewsListModel) Update(msg tea.Msg) (ViewsListModel, tea.Cmd) {
 			case modeViews:
 				return m, func() tea.Msg { return CloseViewsMsg{} }
 			case modePickConn:
-				// Back to modeViews — App must reload view items.
+				// Step back to modeViews. App reloads current-conn views.
 				m.mode = modeViews
-				return m, func() tea.Msg { return CloseViewsMsg{} }
+				return m, func() tea.Msg { return BackToViewsMsg{} }
 			case modePickView:
-				// Back to modePickConn.
+				// Step back to modePickConn. App reloads other-conn names.
 				m.mode = modePickConn
-				return m, func() tea.Msg { return CloseViewsMsg{} }
+				m.pickedConn = ""
+				return m, func() tea.Msg { return EnterPickConnMsg{} }
 			}
 		case "enter":
 			switch m.mode {
@@ -272,6 +286,11 @@ type EnterPickConnMsg struct{}
 // PickConnSelectedMsg is sent when a connection is picked in modePickConn.
 // The App loads that connection's views and calls SetViewItemsForConn.
 type PickConnSelectedMsg struct{ ConnName string }
+
+// BackToViewsMsg is sent when the user presses Esc in modePickConn to step
+// back to modeViews. The App reloads the active connection's views and
+// calls SetViewItems. The modal stays open.
+type BackToViewsMsg struct{}
 
 // ---------------------------------------------------------------------------
 // SaveViewModel

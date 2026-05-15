@@ -880,6 +880,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.viewsList.SetConnItems(otherConns)
 
+	case tui.BackToViewsMsg:
+		// User pressed Esc from modePickConn — reload current connection's
+		// views into the modal so the list reflects modeViews.
+		a.viewsList.SetViewItems(a.loadViewItems())
+
 	case tui.PickConnSelectedMsg:
 		// User picked a source connection — load its views into the modal.
 		var sourceItems []tui.ViewItem
