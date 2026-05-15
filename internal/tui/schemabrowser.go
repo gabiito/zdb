@@ -71,6 +71,7 @@ func NewSchemaBrowserModel(
 		BorderForeground(CtpPink)
 
 	l := list.New(items, delegate, leftWidth, height-4)
+	DisableListQuit(&l)
 	l.Title = "Tables"
 	l.Styles.Title = StyleTitle
 

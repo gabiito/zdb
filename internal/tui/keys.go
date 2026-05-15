@@ -1,6 +1,17 @@
 package tui
 
-import "github.com/charmbracelet/bubbles/key"
+import (
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
+)
+
+// DisableListQuit removes the bubbles/list default Quit binding (q and esc)
+// from a list.Model so the App layer owns the back/cancel/quit semantics.
+// Filter-cancel on Esc is preserved (it's CancelWhileFiltering, not Quit).
+// Call this on every list constructed inside the TUI.
+func DisableListQuit(l *list.Model) {
+	l.KeyMap.Quit = key.NewBinding(key.WithDisabled())
+}
 
 // KeyMap defines all keyboard bindings for zDB.
 type KeyMap struct {

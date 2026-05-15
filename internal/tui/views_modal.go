@@ -111,6 +111,7 @@ func buildList(items []list.Item, width, height int, title string) list.Model {
 	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(CtpMauve)
 
 	l := list.New(items, delegate, boxW-4, boxH-6)
+	DisableListQuit(&l)
 	l.Title = title
 	l.Styles.Title = StyleTitle
 	l.SetShowStatusBar(false)

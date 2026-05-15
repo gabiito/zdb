@@ -136,6 +136,7 @@ func NewJoinWizardModel(leftTable *db.Table, cache JoinCache, width, height int)
 	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(CtpPink)
 
 	tableList := list.New(items, delegate, listW, listH)
+	DisableListQuit(&tableList)
 	tableList.Title = "Pick the table to JOIN with"
 	tableList.Styles.Title = StyleTitle
 	tableList.SetShowStatusBar(false)
@@ -179,6 +180,7 @@ func newColList(title string, cols []db.Column, w, h int) list.Model {
 	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(CtpPink)
 
 	l := list.New(items, delegate, w, h)
+	DisableListQuit(&l)
 	l.Title = title
 	l.Styles.Title = StyleTitle
 	l.SetShowStatusBar(false)
