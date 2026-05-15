@@ -75,6 +75,11 @@ type App struct {
 	configPath string // resolved at startup, used to persist new connections
 	lastSQL    string
 
+	// pendingStatusMsg is a one-shot status-bar message emitted from Init().
+	// Set before the TUI starts (e.g. from legacy migration in main.go) so
+	// the message appears on the first rendered frame.
+	pendingStatusMsg string
+
 	// Pending password / DSN template captured between AddConnectionSubmit
 	// and the testConnResult callback. The password lives only in memory
 	// for the duration of the test.
@@ -154,11 +159,8 @@ func NewApp(loaded config.LoadedConfig, log *slog.Logger) *App {
 
 	provider := ai.New(resolveAIConfig(cfg.ActiveProfile()))
 
-	store, err := views.NewStore()
-	if err != nil {
-		log.Warn("views store unavailable", "err", err)
-	}
-
+	// viewsStore is nil until the first successful ConnectedMsg — the store
+	// is re-initialised per-connection in the ConnectedMsg handler (Slice 4).
 	configPath, err := config.ResolvePath()
 	if err != nil {
 		log.Warn("config path resolution failed", "err", err)
@@ -189,18 +191,29 @@ func NewApp(loaded config.LoadedConfig, log *slog.Logger) *App {
 		inflight:    make(map[string]context.CancelFunc),
 		spinner:     s,
 		sqlBar:      tui.NewSqlBarModel(80),
-		viewsStore:  store,
 		configPath:  configPath,
 		lastDataTab: -1,
 	}
 }
 
+// SetPendingStatusMsg stores a one-shot status-bar message that is emitted as
+// a Cmd from Init(). Call this before handing the App to tea.NewProgram.
+func (a *App) SetPendingStatusMsg(msg string) {
+	a.pendingStatusMsg = msg
+}
+
 // Init implements tea.Model.
 func (a *App) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		a.spinner.Tick,
 		// Status bar will be initialized on first WindowSizeMsg
-	)
+	}
+	if a.pendingStatusMsg != "" {
+		msg := a.pendingStatusMsg
+		a.pendingStatusMsg = ""
+		cmds = append(cmds, func() tea.Msg { return tui.StatusSetMsg{Text: msg} })
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update implements tea.Model — the central event dispatcher.

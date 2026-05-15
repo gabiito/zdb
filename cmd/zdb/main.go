@@ -10,6 +10,7 @@ import (
 	"github.com/gabiito/zdb/internal/config"
 	"github.com/gabiito/zdb/internal/core"
 	"github.com/gabiito/zdb/internal/logging"
+	"github.com/gabiito/zdb/internal/views"
 
 	// Register all DB adapters via init()
 	_ "github.com/gabiito/zdb/internal/db/mysql"
@@ -95,7 +96,21 @@ func runTUI() {
 		os.Exit(1)
 	}
 
+	// One-shot legacy migration: move the pre-per-connection views.toml aside.
+	// This runs once per boot; subsequent boots where the file is absent are
+	// no-ops. Non-fatal — if it fails we log to stderr and continue.
+	movedTo, mErr := views.MigrateLegacyViews()
+	if mErr != nil {
+		fmt.Fprintf(os.Stderr, "zdb: legacy views migration failed: %v\n", mErr)
+	}
+
 	app := core.NewApp(loaded, log)
+	if movedTo != "" {
+		app.SetPendingStatusMsg(fmt.Sprintf(
+			"legacy views.toml moved aside to %s — views are not carried forward; use Copy View From Connection to import individually.",
+			movedTo,
+		))
+	}
 
 	p := tea.NewProgram(app, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {

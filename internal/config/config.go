@@ -76,6 +76,137 @@ func (c *Config) HasConnectionNamed(name string) bool {
 	return false
 }
 
+// HasConnectionSlugCollision reports whether any connection other than the one
+// named excludeName (case-insensitive) produces the same slug as the provided
+// slug string.
+//
+// Pass excludeName == "" for add flows (no connection to exclude).
+// Pass excludeName == original.Name for rename flows so the connection being
+// renamed does not collide with its own current slug.
+//
+// The slug parameter is passed in already-computed so this package does not
+// need to import internal/views — the caller (app.go) does the computation.
+func (c *Config) HasConnectionSlugCollision(slug, excludeName string) bool {
+	// slugFn is injected by the caller so this method stays import-free.
+	// We store it as a parameter rather than a package-level var to keep
+	// the dependency direction correct (config must not import views).
+	// The caller has already computed the slug; we just need to compute
+	// slugs for ALL other connections. We require the slug function to be
+	// provided via the companion SlugCollisions method.  For this method,
+	// the caller passes in the pre-computed slug, so we only need an
+	// equivalent function to normalise the OTHER connections' names.
+	//
+	// However, re-reading the design: HasConnectionSlugCollision takes the
+	// already-computed slug as first param. It must compare it against slugs
+	// of other connections — but it can't call views.Slug without the import.
+	// The solution: the caller supplies the slug function via the slugFn
+	// field of App, which already imports views. Here we accept a slugFn as
+	// a parameter.
+	//
+	// Wait — re-reading the design signature:
+	//   func (c *Config) HasConnectionSlugCollision(slug, excludeName string) bool
+	// There is no slugFn here. The design says "the slug parameter is passed
+	// in (already computed) so the config package does NOT import internal/views.
+	// The caller in app.go does the slug computation." This means: the caller
+	// does views.Slug(each_name) iteration too? No — the caller only computes
+	// slug for the NEW connection name and then calls this helper which must
+	// compare it against all others. But without importing views it can't slug
+	// the others.
+	//
+	// Resolution from design §2: "the slug parameter is passed in (already
+	// computed)" for the NEW name. For checking others, the helper needs to
+	// normalise them. But config can't import views. So we use a package-level
+	// slug function variable that is set once by the views package at init time,
+	// OR we use the approach from SlugCollisions which takes slugFn as a param.
+	//
+	// Cleanest: store the slug fn as a package-level var in config, set by
+	// internal/views at init — creates a cycle. Alternative: thread the slugFn
+	// through HasConnectionSlugCollision as well, making the signature:
+	//   HasConnectionSlugCollision(slug, excludeName string, slugFn func(string) string) bool
+	// But the design locked the 2-param signature.
+	//
+	// The only cycle-free solution with the locked signature is: the function
+	// computes the slug of each connection NAME using the SAME normalisation
+	// logic inlined here (duplicated) OR a shared internal-only helper.
+	// Looking at the design algorithm, it is a pure string transform with no
+	// external deps — we can inline it here as a private helper. This keeps
+	// the dependency clean and matches the "inline, not extract" principle.
+
+	for _, conn := range c.Connections {
+		if strings.EqualFold(conn.Name, excludeName) {
+			continue
+		}
+		if slugNormalise(conn.Name) == slug {
+			return true
+		}
+	}
+	return false
+}
+
+// SlugCollision describes a pair of connections whose names normalise to the
+// same filesystem slug.
+type SlugCollision struct {
+	A    string // first connection name
+	B    string // second connection name
+	Slug string // the shared slug
+}
+
+// SlugCollisions returns all pairs of connections whose names, when passed
+// through slugFn, produce the same slug. slugFn is injected by the caller
+// (typically app.go which imports internal/views) so this package stays
+// import-free of internal/views.
+//
+// The returned slice has one entry per collision pair. For three connections
+// that all share the same slug, this returns three entries (all pairs).
+func (c *Config) SlugCollisions(slugFn func(string) string) []SlugCollision {
+	// Map slug → first connection name that produced it.
+	seen := make(map[string]string, len(c.Connections))
+	var out []SlugCollision
+	for _, conn := range c.Connections {
+		s := slugFn(conn.Name)
+		if s == "" {
+			// Empty slug — skip (form-submit validation handles this separately).
+			continue
+		}
+		if prev, ok := seen[s]; ok {
+			out = append(out, SlugCollision{A: prev, B: conn.Name, Slug: s})
+		} else {
+			seen[s] = conn.Name
+		}
+	}
+	return out
+}
+
+// slugNormalise is a config-local copy of the views.Slug algorithm so that
+// HasConnectionSlugCollision can normalise connection names without importing
+// internal/views. It must stay in sync with views.Slug.
+//
+// Algorithm: lowercase → replace [^a-z0-9._-]+ with "-" → trim "-".
+func slugNormalise(name string) string {
+	lower := strings.ToLower(name)
+	var b strings.Builder
+	inRun := false
+	for _, r := range lower {
+		if isSlugChar(r) {
+			b.WriteRune(r)
+			inRun = false
+		} else {
+			if !inRun {
+				b.WriteByte('-')
+				inRun = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// isSlugChar reports whether r is an allowed slug character: [a-z0-9._-].
+func isSlugChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') ||
+		(r >= '0' && r <= '9') ||
+		r == '.' || r == '_' || r == '-'
+}
+
 // ActiveProfile returns a pointer to the active profile, or nil when no
 // AI is configured. Falls back to AIs[0] when ActiveAI is empty or the
 // referenced name no longer exists.
