@@ -91,6 +91,13 @@ type App struct {
 	// cancel or successful save. Cleared alongside copyMode.
 	prevScreen ScreenID
 
+	// pendingSaveSQL is set when the user presses Ctrl+S in the SQL editor.
+	// It holds the SQL to save IF the subsequent execute succeeds. On a
+	// successful DBQueryDoneMsg this triggers the save modal; on error or
+	// editor cancel it is cleared and no save modal opens. This gates view
+	// saves on successful execution against the active connection.
+	pendingSaveSQL string
+
 	// Pending password / DSN template captured between AddConnectionSubmit
 	// and the testConnResult callback. The password lives only in memory
 	// for the duration of the test.
@@ -563,6 +570,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		delete(a.inflight, msg.ReqID)
 		if msg.Err != nil {
+			// A pending save-on-success is cancelled when the query fails —
+			// the user must fix the SQL and retry before the view can be saved.
+			a.pendingSaveSQL = ""
 			// AI-driven query failed — surface it in the debug panel so
 			// the user can hint the AI for a fix instead of just losing
 			// the failure context to the status bar.
@@ -587,13 +597,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// it comes from a non-AI path) doesn't trigger the debug panel.
 		a.aiQueryActive = false
 
-		// Copy-mode gate (REQ-19, REQ-20): MUST appear BEFORE normal data-viewer
-		// routing so successful execute in copy-mode opens the save prompt instead
-		// of routing through the paging logic.
-		if a.copyMode.active && a.screen == ScreenSQLEditor {
-			sql := a.sqlEditor.Value()
+		// Save-on-success gate (REQ-19, REQ-20): if Ctrl+S was pressed in the
+		// SQL editor (a.pendingSaveSQL is set), open the save modal now that
+		// the query has proven to run against the active connection. Pre-fill
+		// the name from copy-mode source if we got here via a copy flow.
+		// MUST appear before normal data-viewer routing.
+		if a.pendingSaveSQL != "" {
+			sql := a.pendingSaveSQL
+			a.pendingSaveSQL = ""
 			a.saveView = tui.NewSaveViewModel(sql, a.width, a.height)
-			a.saveView.SetPrefilledName(a.copyMode.sourceViewName)
+			if a.copyMode.active {
+				a.saveView.SetPrefilledName(a.copyMode.sourceViewName)
+			}
 			a.modal = ModalSaveView
 			a.pageDir = 0
 			break
@@ -741,11 +756,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, a.statusBar.SetMsg("nothing to save"))
 			break
 		}
+		// Ctrl+S in the editor is "run and save on success" — we never save
+		// SQL that hasn't been proven to execute against the active connection.
+		// The screen STAYS in ScreenSQLEditor so the gate in DBQueryDoneMsg
+		// can open the save modal (or surface the error and let the user retry).
+		a.pendingSaveSQL = sql
 		a.lastSQL = sql
-		a.saveView = tui.NewSaveViewModel(sql, a.width, a.height)
-		a.modal = ModalSaveView
+		cmds = append(cmds, a.execSQLCmd(sql))
 
 	case tui.SQLEditorCancelMsg:
+		// Cancel discards any pending save-on-success — the user backed out
+		// without committing the SQL.
+		a.pendingSaveSQL = ""
 		// If we're in copy mode, return to the saved prevScreen and clear state.
 		if a.copyMode.active {
 			if a.prevScreen != 0 {
