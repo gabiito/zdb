@@ -47,6 +47,9 @@ func (m *AddConnectionModel) SetTestError(s string) { m.errMsg = "test failed: "
 // a successful connection test) without the "test failed" prefix.
 func (m *AddConnectionModel) SetError(s string) { m.errMsg = s; m.testing = false }
 
+// ErrorText returns the current inline error message (empty when none).
+func (m AddConnectionModel) ErrorText() string { return m.errMsg }
+
 // NewAddConnectionModel builds a fresh form sized for the terminal.
 func NewAddConnectionModel(width, height int) AddConnectionModel {
 	name := textinput.New()

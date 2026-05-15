@@ -85,6 +85,7 @@ var shortcutsCatalog = []Shortcut{
 	// Views
 	{Keys: []string{"V"}, Action: "Open saved views list", Category: CatViews},
 	{Keys: []string{"W"}, Action: "Save current SQL as a named view", Category: CatViews},
+	{Keys: []string{"C"}, Action: "Copy a view from another connection (in views modal)", Category: CatViews},
 
 	// AI
 	{Keys: []string{"Ctrl+A", "F2"}, Action: "Ask AI (natural-language → SQL)", Category: CatAI},

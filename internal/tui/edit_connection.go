@@ -59,6 +59,9 @@ func (m *EditConnectionModel) SetError(s string) {
 	m.testing = false
 }
 
+// ErrorText returns the current inline error message (empty when none).
+func (m EditConnectionModel) ErrorText() string { return m.errMsg }
+
 // NewEditConnectionModel builds an edit form pre-filled from the given
 // connection. The DSN shown is the stored DSN, which may contain a
 // `{password}` placeholder — that's fine, the form treats it as a template.
