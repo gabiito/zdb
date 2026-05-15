@@ -45,6 +45,7 @@ func NewConnPickerModel(connections []config.Connection, width, height int) Conn
 		BorderForeground(CtpPink)
 
 	l := list.New(items, delegate, listWidthFor(width), height-4)
+	DisableListQuit(&l)
 	l.Title = "zDB — select connection"
 	l.Styles.Title = StyleTitle
 
