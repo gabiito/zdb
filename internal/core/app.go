@@ -586,6 +586,19 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Successful query — clear AI tracking so the next failure (if
 		// it comes from a non-AI path) doesn't trigger the debug panel.
 		a.aiQueryActive = false
+
+		// Copy-mode gate (REQ-19, REQ-20): MUST appear BEFORE normal data-viewer
+		// routing so successful execute in copy-mode opens the save prompt instead
+		// of routing through the paging logic.
+		if a.copyMode.active && a.screen == ScreenSQLEditor {
+			sql := a.sqlEditor.Value()
+			a.saveView = tui.NewSaveViewModel(sql, a.width, a.height)
+			a.saveView.SetPrefilledName(a.copyMode.sourceViewName)
+			a.modal = ModalSaveView
+			a.pageDir = 0
+			break
+		}
+
 		isEmpty := msg.ResultSet == nil || len(msg.ResultSet.Rows) == 0
 		// Forward fetches (page-replace or append) on an empty result mean
 		// we ran past the end of the table — leave the buffer intact and
@@ -733,9 +746,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.modal = ModalSaveView
 
 	case tui.SQLEditorCancelMsg:
-		// Going back from the editor — preserve buffer for next open.
-		// If a table was previously open, return to the data viewer;
-		// otherwise to the schema browser; otherwise to the picker.
+		// If we're in copy mode, return to the saved prevScreen and clear state.
+		if a.copyMode.active {
+			if a.prevScreen != 0 {
+				a.screen = a.prevScreen
+				a.prevScreen = 0
+			} else if a.dataViewer.Table() != nil {
+				a.screen = ScreenDataViewer
+			} else if a.cache.Get() != nil {
+				a.screen = ScreenSchemaBrowser
+			} else {
+				a.screen = ScreenConnPicker
+			}
+			a.endCopyMode()
+			break
+		}
+		// Normal cancel — return to best-guess previous screen.
 		if a.dataViewer.Table() != nil {
 			a.screen = ScreenDataViewer
 		} else if a.cache.Get() != nil {
@@ -840,19 +866,94 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tui.CloseViewsMsg:
 		a.modal = ModalNone
+		// Reset views modal mode so it starts fresh next open.
+		a.viewsList = tui.NewViewsListModel(a.loadViewItems(), a.width, a.height)
+
+	case tui.EnterPickConnMsg:
+		// User pressed C in the views modal — populate the connection picker list
+		// with all connections except the currently active one.
+		otherConns := make([]string, 0, len(a.cfg.Connections))
+		for _, c := range a.cfg.Connections {
+			if c.Name != a.connName {
+				otherConns = append(otherConns, c.Name)
+			}
+		}
+		a.viewsList.SetConnItems(otherConns)
+
+	case tui.PickConnSelectedMsg:
+		// User picked a source connection — load its views into the modal.
+		var sourceItems []tui.ViewItem
+		for _, c := range a.cfg.Connections {
+			if c.Name == msg.ConnName {
+				store, err := views.NewStoreForConnection(c)
+				if err == nil {
+					if vs, loadErr := store.Load(); loadErr == nil {
+						for _, v := range vs {
+							sourceItems = append(sourceItems, tui.ViewItem{Name: v.Name, SQL: v.SQL})
+						}
+					}
+				}
+				break
+			}
+		}
+		a.viewsList.SetViewItemsForConn(msg.ConnName, sourceItems)
+
+	case tui.CopyViewSelectedMsg:
+		// User picked a source view — enter copy mode and open the SQL editor.
+		a.copyMode = copyModeState{
+			active:         true,
+			sourceConn:     msg.SourceConn,
+			sourceViewName: msg.ViewName,
+			sourceSQL:      msg.SQL,
+		}
+		a.modal = ModalNone
+		a.openSQLEditorForCopy(msg.SQL)
 
 	case tui.SaveViewSubmitMsg:
-		a.modal = ModalNone
 		if a.viewsStore == nil {
+			a.modal = ModalNone
 			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[views] store unavailable")))
-		} else if err := a.viewsStore.Add(views.View{Name: msg.Name, SQL: msg.SQL}); err != nil {
+			a.endCopyMode()
+			break
+		}
+		// Case-insensitive name collision check against the current connection's views (REQ-21).
+		existing, loadErr := a.viewsStore.Load()
+		if loadErr == nil {
+			for _, v := range existing {
+				if strings.EqualFold(v.Name, msg.Name) {
+					a.saveView.SetError(fmt.Sprintf(
+						"view named %s already exists in this connection — choose a different name",
+						msg.Name,
+					))
+					break
+				}
+			}
+		}
+		if a.saveView.HasError() {
+			// Modal stays open; user must choose a different name.
+			break
+		}
+		a.modal = ModalNone
+		if err := a.viewsStore.Add(views.View{Name: msg.Name, SQL: msg.SQL}); err != nil {
 			cmds = append(cmds, a.statusBar.SetErr(fmt.Errorf("[views] save: %v", err)))
 		} else {
 			cmds = append(cmds, a.statusBar.SetMsg("view saved: "+msg.Name))
 		}
+		// Return user to the pre-copy-mode screen if applicable.
+		if a.copyMode.active && a.screen == ScreenSQLEditor && a.prevScreen != 0 {
+			a.screen = a.prevScreen
+		}
+		a.endCopyMode()
+		a.prevScreen = 0
 
 	case tui.SaveViewCancelMsg:
 		a.modal = ModalNone
+		// If we were in copy mode, also return to the previous screen.
+		if a.copyMode.active && a.screen == ScreenSQLEditor && a.prevScreen != 0 {
+			a.screen = a.prevScreen
+		}
+		a.endCopyMode()
+		a.prevScreen = 0
 
 	case tui.AddConnectionSubmitMsg:
 		conn := msg.Connection

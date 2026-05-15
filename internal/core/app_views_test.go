@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -367,5 +368,202 @@ func TestEndCopyMode(t *testing.T) {
 
 	if a.copyMode.active || a.copyMode.sourceConn != "" || a.copyMode.sourceViewName != "" {
 		t.Errorf("copyMode not zeroed after endCopyMode: %+v", a.copyMode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Slice 5 — copy-mode state machine
+// ---------------------------------------------------------------------------
+
+// buildCopyModeApp builds a minimal App for copy-mode state machine tests.
+// The App has a views store wired to tmp dir, a SQL editor, and a status bar.
+func buildCopyModeApp(t *testing.T, connName string) *App {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("ZDB_CONFIG", filepath.Join(dir, "config.toml"))
+
+	conn := config.Connection{Name: connName, Engine: "sqlite", DSN: ":memory:"}
+	store, err := views.NewStoreForConnection(conn)
+	if err != nil {
+		t.Fatalf("views.NewStoreForConnection: %v", err)
+	}
+
+	return &App{
+		cfg:        config.Config{Connections: []config.Connection{conn}},
+		configPath: filepath.Join(dir, "config.toml"),
+		statusBar:  tui.StatusBarModel{},
+		inflight:   newInflight(),
+		log:        discardLog(),
+		connName:   connName,
+		viewsStore: store,
+		screen:     ScreenDataViewer,
+		sqlEditor:  tui.NewSQLEditorModel(80, 24),
+	}
+}
+
+// TestCopyModeHappyPath verifies the full happy-path: CopyViewSelectedMsg →
+// open editor → DBQueryDoneMsg success → save prompt → SaveViewSubmitMsg.
+func TestCopyModeHappyPath(t *testing.T) {
+	a := buildCopyModeApp(t, "staging")
+
+	// Step 1: User picks a source view.
+	_, _ = a.Update(tui.CopyViewSelectedMsg{
+		SourceConn: "prod",
+		ViewName:   "active orders",
+		SQL:        "SELECT * FROM orders",
+	})
+
+	if !a.copyMode.active {
+		t.Fatal("copyMode not active after CopyViewSelectedMsg")
+	}
+	if a.screen != ScreenSQLEditor {
+		t.Errorf("screen = %v; want ScreenSQLEditor", a.screen)
+	}
+	if a.prevScreen != ScreenDataViewer {
+		t.Errorf("prevScreen = %v; want ScreenDataViewer", a.prevScreen)
+	}
+
+	// Step 2: Successful execute — save prompt opens.
+	reqID := "qry-1"
+	a.inflight[reqID] = func() {}
+	_, _ = a.Update(DBQueryDoneMsg{ReqID: reqID, ResultSet: nil, Err: nil})
+
+	if a.modal != ModalSaveView {
+		t.Errorf("modal = %v; want ModalSaveView", a.modal)
+	}
+	// Name should be pre-filled.
+	if !strings.Contains(a.saveView.View(), "active orders") {
+		t.Error("saveView.View() does not contain prefilled name 'active orders'")
+	}
+
+	// Step 3: Submit save.
+	_, _ = a.Update(tui.SaveViewSubmitMsg{Name: "active orders", SQL: "SELECT * FROM orders"})
+
+	if a.copyMode.active {
+		t.Error("copyMode still active after successful save")
+	}
+	if a.modal != ModalNone {
+		t.Errorf("modal = %v; want ModalNone after save", a.modal)
+	}
+	if a.screen != ScreenDataViewer {
+		t.Errorf("screen = %v; want ScreenDataViewer (prevScreen restored)", a.screen)
+	}
+}
+
+// TestCopyModeSQLFailure verifies REQ-19: when the execute fails in copy mode,
+// no save prompt opens and copyMode stays active so the user can retry.
+func TestCopyModeSQLFailure(t *testing.T) {
+	a := buildCopyModeApp(t, "staging")
+
+	_, _ = a.Update(tui.CopyViewSelectedMsg{
+		SourceConn: "prod", ViewName: "bad view", SQL: "SELECT * FROM no_such_table",
+	})
+
+	reqID := "qry-fail"
+	a.inflight[reqID] = func() {}
+	_, _ = a.Update(DBQueryDoneMsg{ReqID: reqID, Err: fmt.Errorf("table not found")})
+
+	if a.modal == ModalSaveView {
+		t.Error("modal is ModalSaveView on query error; should not have opened save prompt")
+	}
+	if !a.copyMode.active {
+		t.Error("copyMode cleared on query error; should remain active for retry")
+	}
+}
+
+// TestCopyModeSaveCollision verifies REQ-21: when the submitted name already
+// exists in the current connection's views, the modal stays open with an error.
+func TestCopyModeSaveCollision(t *testing.T) {
+	a := buildCopyModeApp(t, "staging")
+
+	// Pre-save a view named "my view" in staging.
+	if err := a.viewsStore.Add(views.View{Name: "my view", SQL: "SELECT 1"}); err != nil {
+		t.Fatalf("pre-save view: %v", err)
+	}
+
+	// Enter copy mode manually.
+	a.copyMode = copyModeState{active: true, sourceConn: "prod", sourceViewName: "my view"}
+	a.screen = ScreenSQLEditor
+	a.saveView = tui.NewSaveViewModel("SELECT 2", a.width, a.height)
+	a.modal = ModalSaveView
+
+	// Submit with the colliding name.
+	_, _ = a.Update(tui.SaveViewSubmitMsg{Name: "my view", SQL: "SELECT 2"})
+
+	if a.modal != ModalSaveView {
+		t.Errorf("modal = %v; want ModalSaveView (collision should keep modal open)", a.modal)
+	}
+	if !a.saveView.HasError() {
+		t.Error("saveView.HasError() = false; want true on name collision")
+	}
+	if !a.copyMode.active {
+		t.Error("copyMode cleared on collision; should stay active")
+	}
+}
+
+// TestCopyModeCancel verifies REQ-23: cancelling the SQL editor during copy
+// mode clears the copy state.
+func TestCopyModeCancel(t *testing.T) {
+	a := buildCopyModeApp(t, "staging")
+
+	_, _ = a.Update(tui.CopyViewSelectedMsg{
+		SourceConn: "prod", ViewName: "view1", SQL: "SELECT 1",
+	})
+	if !a.copyMode.active {
+		t.Fatal("copyMode not active after CopyViewSelectedMsg")
+	}
+
+	// Cancel the editor.
+	_, _ = a.Update(tui.SQLEditorCancelMsg{})
+
+	if a.copyMode.active {
+		t.Error("copyMode still active after SQLEditorCancelMsg")
+	}
+	if a.screen == ScreenSQLEditor {
+		t.Errorf("screen = ScreenSQLEditor after cancel; should have returned to prevScreen")
+	}
+}
+
+// TestCopyModeSaveViewCancelMsg verifies REQ-23: cancelling the save prompt
+// during copy mode clears the copy state.
+func TestCopyModeSaveViewCancelMsg(t *testing.T) {
+	a := buildCopyModeApp(t, "staging")
+
+	a.copyMode = copyModeState{active: true, sourceConn: "prod", sourceViewName: "v1"}
+	a.prevScreen = ScreenSchemaBrowser
+	a.screen = ScreenSQLEditor
+	a.modal = ModalSaveView
+
+	_, _ = a.Update(tui.SaveViewCancelMsg{})
+
+	if a.copyMode.active {
+		t.Error("copyMode still active after SaveViewCancelMsg")
+	}
+	if a.modal != ModalNone {
+		t.Errorf("modal = %v; want ModalNone after cancel", a.modal)
+	}
+}
+
+// TestCopyModeConnectionSwitchTeardown verifies REQ-23: switching connections
+// while copy mode is active silently discards the draft.
+func TestCopyModeConnectionSwitchTeardown(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ZDB_CONFIG", filepath.Join(dir, "config.toml"))
+
+	dev := config.Connection{Name: "dev", Engine: "sqlite", DSN: ":memory:"}
+	a := &App{
+		cfg:      config.Config{Connections: []config.Connection{dev}},
+		inflight: newInflight(),
+		log:      discardLog(),
+		copyMode: copyModeState{active: true, sourceConn: "prod", sourceViewName: "v"},
+	}
+
+	reqID := "conn-switch"
+	a.inflight[reqID] = func() {}
+
+	_, _ = a.Update(ConnectedMsg{ReqID: reqID, ConnName: "dev", Err: nil})
+
+	if a.copyMode.active {
+		t.Error("copyMode still active after connection switch; should be cleared")
 	}
 }
