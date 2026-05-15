@@ -402,7 +402,8 @@ func buildCopyModeApp(t *testing.T, connName string) *App {
 }
 
 // TestCopyModeHappyPath verifies the full happy-path: CopyViewSelectedMsg →
-// open editor → DBQueryDoneMsg success → save prompt → SaveViewSubmitMsg.
+// open editor → Ctrl+S (SQLEditorSaveViewMsg) → DBQueryDoneMsg success →
+// save prompt → SaveViewSubmitMsg.
 func TestCopyModeHappyPath(t *testing.T) {
 	a := buildCopyModeApp(t, "staging")
 
@@ -423,13 +424,24 @@ func TestCopyModeHappyPath(t *testing.T) {
 		t.Errorf("prevScreen = %v; want ScreenDataViewer", a.prevScreen)
 	}
 
-	// Step 2: Successful execute — save prompt opens.
+	// Step 2: User presses Ctrl+S → queues execute and arms the save-on-success
+	// gate. execSQLCmd in the test path no-ops (no driver) but pendingSaveSQL is set.
+	_, _ = a.Update(tui.SQLEditorSaveViewMsg{SQL: "SELECT * FROM orders"})
+
+	if a.pendingSaveSQL == "" {
+		t.Fatal("pendingSaveSQL empty after Ctrl+S; gate will not fire")
+	}
+
+	// Step 3: Successful execute — save prompt opens via the pendingSaveSQL gate.
 	reqID := "qry-1"
 	a.inflight[reqID] = func() {}
 	_, _ = a.Update(DBQueryDoneMsg{ReqID: reqID, ResultSet: nil, Err: nil})
 
 	if a.modal != ModalSaveView {
 		t.Errorf("modal = %v; want ModalSaveView", a.modal)
+	}
+	if a.pendingSaveSQL != "" {
+		t.Errorf("pendingSaveSQL = %q; want empty after gate fires", a.pendingSaveSQL)
 	}
 	// Name should be pre-filled.
 	if !strings.Contains(a.saveView.View(), "active orders") {
@@ -450,8 +462,9 @@ func TestCopyModeHappyPath(t *testing.T) {
 	}
 }
 
-// TestCopyModeSQLFailure verifies REQ-19: when the execute fails in copy mode,
-// no save prompt opens and copyMode stays active so the user can retry.
+// TestCopyModeSQLFailure verifies REQ-19: when the execute fails after the
+// user arms the save-on-success gate (Ctrl+S), no save prompt opens, the
+// pending save is cleared, and copyMode stays active so the user can retry.
 func TestCopyModeSQLFailure(t *testing.T) {
 	a := buildCopyModeApp(t, "staging")
 
@@ -459,12 +472,18 @@ func TestCopyModeSQLFailure(t *testing.T) {
 		SourceConn: "prod", ViewName: "bad view", SQL: "SELECT * FROM no_such_table",
 	})
 
+	// User presses Ctrl+S → arms save-on-success gate.
+	_, _ = a.Update(tui.SQLEditorSaveViewMsg{SQL: "SELECT * FROM no_such_table"})
+
 	reqID := "qry-fail"
 	a.inflight[reqID] = func() {}
 	_, _ = a.Update(DBQueryDoneMsg{ReqID: reqID, Err: fmt.Errorf("table not found")})
 
 	if a.modal == ModalSaveView {
 		t.Error("modal is ModalSaveView on query error; should not have opened save prompt")
+	}
+	if a.pendingSaveSQL != "" {
+		t.Errorf("pendingSaveSQL = %q on error; want empty so retry rearms cleanly", a.pendingSaveSQL)
 	}
 	if !a.copyMode.active {
 		t.Error("copyMode cleared on query error; should remain active for retry")
